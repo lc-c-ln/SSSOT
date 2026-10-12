@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSSOT 문서 동기화</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1c2330; --muted: #667085; --line: #e3e6ec;
+  --accent: #2f5bea; --accent-ink: #ffffff; --accent-soft: #e9efff;
+  --add: #0b7a4b; --add-bg: #e3f6ec; --del: #b42318; --del-bg: #fdeceb;
+  --warn: #8a5a00; --warn-bg: #fff3d6; --info: #475467; --info-bg: #eef0f4;
+  --radius: 10px; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1a1f28; --text: #e6e9ef; --muted: #98a2b3; --line: #2b3240;
+    --accent: #6b8cff; --accent-ink: #0d1020; --accent-soft: #232c4a;
+    --add: #5fd39b; --add-bg: #15382a; --del: #ff8a80; --del-bg: #43211f;
+    --warn: #f2c05c; --warn-bg: #3a2e12; --info: #b5bdcc; --info-bg: #262c38;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1f28; --text: #e6e9ef; --muted: #98a2b3; --line: #2b3240;
+  --accent: #6b8cff; --accent-ink: #0d1020; --accent-soft: #232c4a;
+  --add: #5fd39b; --add-bg: #15382a; --del: #ff8a80; --del-bg: #43211f;
+  --warn: #f2c05c; --warn-bg: #3a2e12; --info: #b5bdcc; --info-bg: #262c38;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "Segoe UI", "Malgun Gothic", sans-serif; }
+header { padding: 18px 24px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+header h1 { margin: 0; font-size: 18px; }
+header span { color: var(--muted); }
+main { display: grid; grid-template-columns: 340px 1fr; gap: 20px; padding: 20px 24px 100px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 14px 16px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+.card + .card { margin-top: 14px; }
+h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+label { display: block; font-weight: 600; margin: 10px 0 4px; }
+input[type=text], select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tabs { display: flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 8px; margin-bottom: 8px; }
+.tabs button { flex: 1; border: 0; background: transparent; padding: 6px; border-radius: 6px; color: var(--muted); font: inherit; cursor: pointer; }
+.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); font-weight: 600; }
+.drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 14px; text-align: center; color: var(--muted); cursor: pointer; }
+.drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.files { list-style: none; margin: 8px 0 0; padding: 0; }
+.files li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.files button { border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row input[type=checkbox] { margin: 0; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.ok { background: var(--add); } .dot.bad { background: var(--del); }
+.btn { border: 0; border-radius: 8px; padding: 10px 14px; font: inherit; font-weight: 600; cursor: pointer; background: var(--accent); color: var(--accent-ink); width: 100%; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.ghost { background: var(--accent-soft); color: var(--text); width: auto; padding: 6px 10px; font-weight: 500; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.chip { padding: 3px 10px; border-radius: 999px; background: var(--info-bg); color: var(--info); font-size: 12px; }
+.docname { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.docname h3 { margin: 0; font-size: 15px; word-break: break-all; }
+.badge { display: inline-block; min-width: 64px; text-align: center; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+.b-update, .b-fill { background: var(--accent-soft); color: var(--accent); }
+.b-add { background: var(--add-bg); color: var(--add); }
+.b-narrative { background: #efe7ff; color: #5b34c7; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .b-narrative { background: #2f2650; color: #b9a2ff; } }
+.b-review { background: var(--warn-bg); color: var(--warn); }
+.b-missing { background: var(--info-bg); color: var(--info); }
+.table { width: 100%; border-collapse: collapse; }
+.table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.table tr.off td { opacity: .55; }
+.scroll { overflow-x: auto; }
+.mono { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.old { background: var(--del-bg); color: var(--del); text-decoration: line-through; padding: 0 3px; border-radius: 3px; }
+.new { background: var(--add-bg); color: var(--add); padding: 0 3px; border-radius: 3px; }
+.muted { color: var(--muted); font-size: 12px; }
+.empty { text-align: center; padding: 28px; color: var(--muted); }
+.err { background: var(--del-bg); color: var(--del); padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; white-space: pre-wrap; }
+.bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 12px 24px; display: flex; gap: 14px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.bar .btn { width: auto; }
+.links a { color: var(--accent); font-weight: 600; margin-left: 10px; }
+.spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: sp .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes sp { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>SSSOT 문서 동기화</h1>
+  <span>Spring 소스를 기준으로 정의서·매뉴얼을 갱신합니다. 변경 항목을 검토하고 승인한 것만 반영하세요.</span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>1. 소스</h2>
+      <div class="tabs" role="tablist">
+        <button id="tab-path" class="on" role="tab" type="button">폴더 경로</button>
+        <button id="tab-zip" role="tab" type="button">zip 업로드</button>
+      </div>
+      <div id="pane-path">
+        <input id="srcPath" type="text" placeholder="예: C:\work\my-spring-app" autocomplete="off" aria-label="소스 폴더 경로">
+        <div class="hint">이 PC에 있는 Spring 프로젝트 루트 폴더입니다.</div>
+      </div>
+      <div id="pane-zip" hidden>
+        <input id="srcZip" type="file" accept=".zip" aria-label="소스 zip 파일">
+        <div class="hint">프로젝트를 zip으로 압축해 올립니다.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. 문서 (docx · md · xlsx)</h2>
+      <div id="drop" class="drop" tabindex="0" role="button">파일을 끌어다 놓거나 클릭해서 선택</div>
+      <input id="docInput" type="file" multiple accept=".docx,.md,.markdown,.xlsx" hidden>
+      <ul id="fileList" class="files"></ul>
+    </div>
+
+    <div class="card">
+      <h2>3. 옵션</h2>
+      <div class="row"><input id="useLlm" type="checkbox"><label for="useLlm" style="margin:0">AI 사용 (신규 설명 생성 · 매뉴얼 본문 점검)</label></div>
+      <div id="llmBox" hidden>
+        <label for="model">Ollama 모델</label>
+        <select id="model"></select>
+        <div class="hint"><span id="dot" class="dot"></span> <span id="ollamaMsg">확인 중…</span></div>
+      </div>
+      <div class="row" style="margin-top:10px"><input id="strict" type="checkbox"><label for="strict" style="margin:0">목록 칸 엄격 비교</label></div>
+      <button id="run" class="btn" type="button" style="margin-top:14px">미리보기 실행</button>
+      <div class="hint">미리보기는 문서를 수정하지 않습니다.</div>
+    </div>
+  </section>
+
+  <section id="results" aria-live="polite">
+    <div class="card empty">왼쪽에서 소스와 문서를 지정하고 <b>미리보기 실행</b>을 누르세요.</div>
+  </section>
+</main>
+
+<div class="bar" id="bar" hidden>
+  <span id="selInfo" class="muted"></span>
+  <span class="links" id="links"></span>
+  <button id="apply" class="btn" type="button">선택 항목 적용하고 내려받기</button>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const LABEL = { update: "수정", fill: "채움", add: "추가", narrative: "본문 수정", review: "확인 필요", missing: "소스에 없음" };
+const FIELD = { name: "클래스명", stereotype: "유형", package: "패키지", summary: "설명", methods: "메서드", fields: "필드",
+  http_method: "HTTP 메서드", path: "경로", controller: "컨트롤러", handler: "핸들러", params: "파라미터", returns: "반환", key: "키", value: "값" };
+const files = [];       // {name, data(base64)}
+let state = null;       // 마지막 미리보기 결과
+const picked = {};      // docName -> Set(id)
+
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+function toB64(buf) { let s = ""; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); }
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v); }
+  for (const kid of kids) e.append(kid instanceof Node ? kid : document.createTextNode(kid ?? ""));
+  return e;
+}
+
+// ---- 소스 탭
+function tab(which) {
+  $("tab-path").classList.toggle("on", which === "path"); $("tab-zip").classList.toggle("on", which === "zip");
+  $("pane-path").hidden = which !== "path"; $("pane-zip").hidden = which !== "zip";
+}
+$("tab-path").onclick = () => tab("path"); $("tab-zip").onclick = () => tab("zip");
+$("srcPath").value = store("ssot.src") || "";
+
+// ---- 문서 선택
+function renderFiles() {
+  const ul = $("fileList"); ul.replaceChildren();
+  files.forEach((f, i) => ul.append(el("li", {}, el("span", {}, f.name), el("button", { type: "button", "aria-label": f.name + " 제거", onclick: () => { files.splice(i, 1); renderFiles(); } }, "✕"))));
+}
+async function addFiles(list) {
+  for (const f of list) {
+    if (!/\.(docx|md|markdown|xlsx)$/i.test(f.name)) continue;
+    const entry = { name: f.name, data: toB64(await f.arrayBuffer()) };
+    const idx = files.findIndex((x) => x.name === f.name);
+    if (idx >= 0) files[idx] = entry; else files.push(entry);
+  }
+  renderFiles();
+}
+const drop = $("drop");
+drop.onclick = () => $("docInput").click();
+drop.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("docInput").click(); } };
+$("docInput").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
+
+// ---- AI 옵션
+$("useLlm").onchange = () => { $("llmBox").hidden = !$("useLlm").checked; };
+async function loadStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    const sel = $("model"); sel.replaceChildren();
+    const o = s.ollama;
+    if (o.ok && o.models.length) {
+      o.models.forEach((m) => sel.append(el("option", { value: m }, m)));
+      const last = store("ssot.model"); if (last && o.models.includes(last)) sel.value = last;
+      $("dot").className = "dot ok"; $("ollamaMsg").textContent = "Ollama 연결됨 · 모델 " + o.models.length + "개";
+    } else if (o.ok) {
+      sel.append(el("option", { value: "" }, "(받은 모델 없음)"));
+      $("dot").className = "dot bad"; $("ollamaMsg").textContent = "Ollama는 실행 중이지만 모델이 없습니다. ollama pull qwen2.5:7b";
+    } else {
+      sel.append(el("option", { value: "" }, "(연결 안 됨)"));
+      $("dot").className = "dot bad"; $("ollamaMsg").textContent = "Ollama에 연결할 수 없습니다. 설치/실행을 확인하세요.";
+    }
+  } catch (e) { $("ollamaMsg").textContent = "상태를 확인하지 못했습니다."; }
+}
+loadStatus();
+
+// ---- 미리보기
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j;
+}
+function showError(msg) { $("results").replaceChildren(el("div", { class: "card" }, el("div", { class: "err" }, msg))); $("bar").hidden = true; }
+
+$("run").onclick = async () => {
+  const body = { docs: files, llm: $("useLlm").checked, model: $("model").value, strict: $("strict").checked };
+  if (!$("pane-zip").hidden) {
+    const z = $("srcZip").files[0];
+    if (!z) return showError("소스 zip 파일을 선택하세요.");
+    body.src_zip = toB64(await z.arrayBuffer());
+  } else {
+    if (!$("srcPath").value.trim()) return showError("소스 폴더 경로를 입력하세요.");
+    body.src_path = $("srcPath").value.trim(); store("ssot.src", body.src_path);
+  }
+  if (!files.length) return showError("문서를 하나 이상 올려 주세요.");
+  if (body.model) store("ssot.model", body.model);
+  const btn = $("run"); btn.disabled = true;
+  btn.replaceChildren(el("span", { class: "spin" }), body.llm ? "AI 분석 중… (모델에 따라 수십 초)" : "분석 중…");
+  try { state = await post("/api/preview", body); render(); }
+  catch (e) { showError(e.message); }
+  finally { btn.disabled = false; btn.textContent = "미리보기 실행"; }
+};
+
+// ---- 결과 렌더링
+function diff(c) {
+  const box = el("div", {});
+  if (c.action === "add") {
+    box.append(el("span", { class: "new" }, "새 행 추가"));
+    if (c.new && c.new !== "(설명 없음)") box.append(" ", el("span", { class: "muted" }, "설명: " + c.new));
+    else box.append(" ", el("span", { class: "muted" }, "설명 비어 있음"));
+    return box;
+  }
+  if (c.old || c.new) {
+    if (c.old) box.append(el("span", { class: "old mono" }, c.old), " ");
+    if (c.new) box.append(el("span", { class: "new mono" }, c.new));
+  }
+  return box;
+}
+function render() {
+  const root = $("results"); root.replaceChildren(); $("links").replaceChildren();
+  const f = state.facts, chips = el("div", { class: "chips" });
+  chips.append(el("span", { class: "chip" }, `소스에서 추출: 클래스 ${f.class || 0} · API ${f.endpoint || 0} · 설정 ${f.config || 0}`));
+  root.append(chips);
+  state.docs.forEach((d) => {
+    picked[d.name] = new Set(d.changes.filter((c) => c.applicable && c.action !== "narrative").map((c) => c.id));
+    const card = el("div", { class: "card" });
+    const counts = {}; d.changes.forEach((c) => counts[c.action] = (counts[c.action] || 0) + 1);
+    const head = el("div", { class: "docname" }, el("h3", {}, d.name));
+    const tools = el("div", { class: "row" });
+    tools.append(el("button", { class: "btn ghost", type: "button", onclick: () => { d.changes.forEach((c) => c.applicable && picked[d.name].add(c.id)); render2(); } }, "전체 선택"),
+                 el("button", { class: "btn ghost", type: "button", onclick: () => { picked[d.name].clear(); render2(); } }, "전체 해제"));
+    head.append(tools); card.append(head);
+    if (!d.changes.length) { card.append(el("div", { class: "empty" }, "✓ 소스와 일치합니다. 변경할 내용이 없습니다.")); root.append(card); return; }
+    const sum = el("div", { class: "chips" });
+    Object.keys(LABEL).filter((k) => counts[k]).forEach((k) => sum.append(el("span", { class: "badge b-" + k }, `${LABEL[k]} ${counts[k]}`)));
+    card.append(sum);
+    const wrap = el("div", { class: "scroll" }), t = el("table", { class: "table" });
+    t.append(el("thead", {}, el("tr", {}, ...["", "구분", "위치", "대상", "항목", "변경 내용", "근거"].map((h) => el("th", {}, h)))));
+    const tb = el("tbody", {});
+    d.changes.forEach((c) => {
+      const cb = c.applicable ? el("input", { type: "checkbox", "aria-label": `${c.key} 적용`, onchange: (e) => { e.target.checked ? picked[d.name].add(c.id) : picked[d.name].delete(c.id); refresh(); } }) : el("span", {});
+      if (c.applicable) cb.checked = picked[d.name].has(c.id);
+      const tr = el("tr", { "data-doc": d.name, "data-id": c.id },
+        el("td", {}, cb), el("td", {}, el("span", { class: "badge b-" + c.action }, LABEL[c.action])),
+        el("td", { class: "muted" }, c.where), el("td", { class: "mono" }, c.key),
+        el("td", {}, FIELD[c.field] || c.field || ""), el("td", {}, diff(c), c.note && !c.new ? el("div", { class: "muted" }, c.note) : ""),
+        el("td", { class: "muted mono" }, [c.source, c.new && c.action !== "add" ? c.note : ""].filter(Boolean).join(" · ")));
+      tb.append(tr);
+    });
+    t.append(tb); wrap.append(t); card.append(wrap); root.append(card);
+  });
+  $("bar").hidden = false; refresh();
+}
+function render2() { document.querySelectorAll("tbody tr").forEach((tr) => { const cb = tr.querySelector("input"); if (cb) cb.checked = picked[tr.dataset.doc].has(+tr.dataset.id); }); refresh(); }
+function refresh() {
+  let n = 0; for (const s of Object.values(picked)) n += s.size;
+  document.querySelectorAll("tbody tr").forEach((tr) => { const cb = tr.querySelector("input"); tr.classList.toggle("off", !!cb && !cb.checked); });
+  $("selInfo").textContent = `선택 ${n}건`; $("apply").disabled = n === 0;
+}
+
+// ---- 적용
+$("apply").onclick = async () => {
+  const accepted = {}; for (const [k, v] of Object.entries(picked)) if (v.size) accepted[k] = [...v];
+  const btn = $("apply"); btn.disabled = true;
+  try {
+    const r = await post("/api/apply", { session: state.session, accepted });
+    const links = $("links"); links.replaceChildren();
+    r.files.forEach((f) => links.append(el("a", { href: f.url, download: f.file }, `⬇ ${f.file} (${f.applied}건)`)));
+    if (!r.files.length) links.textContent = "적용할 항목이 없습니다.";
+  } catch (e) { $("links").textContent = e.message; }
+  finally { refresh(); }
+};
+</script>
+</body>
+</html>
