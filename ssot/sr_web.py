@@ -17,6 +17,8 @@ import os
 import subprocess
 
 from .classify import process_sr, set_manual
+from .docsync import apply_doc_patch, dismiss_doc_patch, handle_push, scan_commit, verify_secret
+from . import gitops
 from .gitlab import PublishError, publish
 from .impact import analyze_sr, confirm_selection
 from .patch import decide, generate_patch
@@ -147,6 +149,54 @@ class App:
         self.start_patch(sr_id)
         return self.detail(sr_id)
 
+    # ---- 문서 갱신 (M4) ----
+    def run_hook(self, payload: dict) -> None:
+        with self._classify_lock:
+            try:
+                res = handle_push(self.store, self.llm, payload)
+                self.store.audit(None, "gitlab", "hook.processed", {"result": res})
+            except Exception as e:  # noqa: BLE001
+                self.store.audit(None, "system", "hook.failed", {"error": f"{type(e).__name__}: {e}"})
+
+    def hook_gitlab(self, payload: dict) -> dict:
+        if self.sync_mode:
+            self.run_hook(payload)
+        else:
+            threading.Thread(target=self.run_hook, args=(payload,), daemon=True).start()
+        return {"accepted": True}
+
+    def docs_list(self) -> dict:
+        items = self.store.list_doc_patches()
+        for it in items:   # 목록에는 편집 명령(op)을 싣지 않는다
+            it["changes"] = [{k: v for k, v in c.items() if k != "op"} | {"applicable": bool(c.get("op"))} for c in it["changes"]]
+        return {"items": items, "webhook_ready": bool(os.environ.get("SSOT_WEBHOOK_SECRET"))}
+
+    def docs_scan(self, p: dict) -> dict:
+        proj = self.store.get_project(str(p.get("project", "")))
+        if not proj:
+            raise ValueError("등록되지 않은 프로젝트입니다.")
+        root = Path(proj["local_path"])
+        sha = str(p.get("sha", "")).strip() or gitops.run(root, "rev-parse", proj["default_branch"]).stdout.decode().strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+            raise ValueError("커밋 해시 형식이 올바르지 않습니다.")
+        sha = gitops.run(root, "rev-parse", "--verify", f"{sha}^{{commit}}").stdout.decode().strip()
+        msg = gitops.run(root, "log", "-1", "--format=%B", sha).stdout.decode("utf-8", "replace")
+        self.store.audit(None, str(p.get("actor", "")).strip() or "unknown", "doc.scan_requested",
+                         {"project": proj["name"], "commit": sha})
+        with self._classify_lock:
+            try:
+                return scan_commit(self.store, self.llm, proj, sha, [msg], use_llm=bool(p.get("use_llm", True)))
+            except gitops.GitError as e:
+                raise ValueError(str(e)) from e
+
+    def docs_apply(self, pid: int, p: dict) -> dict:
+        out = apply_doc_patch(self.store, pid, str(p.get("actor", "")), [int(i) for i in p.get("accepted", [])])
+        return {"output": str(out)}
+
+    def docs_dismiss(self, pid: int, p: dict) -> dict:
+        dismiss_doc_patch(self.store, pid, str(p.get("actor", "")), str(p.get("reason", "")))
+        return {"ok": True}
+
     # ---- 수정안 ----
     def run_patch(self, sr_id: int, feedback: str = "") -> None:
         with self._classify_lock:
@@ -268,6 +318,8 @@ def make_handler(app: App):
                 return self._guard(lambda: {"items": app.store.list_sr()})
             if path == "/api/projects":
                 return self._guard(app.projects)
+            if path == "/api/docs":
+                return self._guard(app.docs_list)
             m = re.fullmatch(r"/api/projects/check", path)
             if m:
                 name = parse_qs(urlparse(self.path).query).get("name", [""])[0]
@@ -298,6 +350,18 @@ def make_handler(app: App):
 
             if path == "/api/sr":
                 return self._guard(lambda: app.create(body()))
+            if path == "/api/hooks/gitlab":
+                if not os.environ.get("SSOT_WEBHOOK_SECRET"):
+                    return self._json(503, {"error": "SSOT_WEBHOOK_SECRET 환경변수가 설정되지 않아 웹훅을 받지 않습니다."})
+                if not verify_secret(self.headers.get("X-Gitlab-Token")):
+                    return self._json(401, {"error": "토큰이 올바르지 않습니다."})
+                return self._guard(lambda: app.hook_gitlab(body()))
+            if path == "/api/docs/scan":
+                return self._guard(lambda: app.docs_scan(body()))
+            m = re.fullmatch(r"/api/docs/(\d+)/(apply|dismiss)", path)
+            if m:
+                fn = app.docs_apply if m.group(2) == "apply" else app.docs_dismiss
+                return self._guard(lambda: fn(int(m.group(1)), body()))
             if path == "/api/projects":
                 return self._guard(lambda: app.save_project(body()))
             if path == "/api/projects/delete":

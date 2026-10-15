@@ -18,7 +18,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px s
 details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]{border-color:var(--acc);color:var(--acc);font-weight:600}.ok{color:var(--ok)}.cand{border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:6px 0}.cand label{display:flex;gap:8px;align-items:center;margin:0;color:var(--ink);font-size:14px}.cand input{width:auto}.diff{font:12px/1.45 ui-monospace,Consolas,monospace;border:1px solid var(--line);border-radius:6px;overflow-x:auto;margin:6px 0}.diff div{padding:0 8px;white-space:pre}.diff .a{background:#e2f5e8;color:#0d6b3a}.diff .d{background:#fbe5e6;color:#a4262c}.diff .h{background:var(--bg);color:var(--mut)}summary{cursor:pointer}
 </style></head><body><div class="w">
 <div><h1>SR 접수</h1><div class="m" id="st">상태 확인 중…</div></div>
-<div class="tabs"><button id="t1" aria-selected="true">요청</button><button id="t2" aria-selected="false">프로젝트 설정</button></div>
+<div class="tabs"><button id="t1" aria-selected="true">요청</button><button id="t2" aria-selected="false">프로젝트 설정</button><button id="t3" aria-selected="false">문서 갱신</button></div>
 <div class="g" id="p1">
  <form class="c" id="f"><h2>새 서비스 요청</h2>
   <label for="requester">요청자</label><input id="requester" required maxlength="100">
@@ -29,6 +29,10 @@ details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]
  <div class="c"><h2>요청 목록</h2><div class="sc"><table><thead><tr><th>번호</th><th>제목</th><th>상태</th><th>유형</th></tr></thead><tbody id="list"></tbody></table></div></div>
 </div>
 <div class="c" id="d" hidden></div>
+<div id="p3" hidden class="w">
+ <div class="c"><h2>문서 갱신 제안</h2><div class="m" id="hookst"></div>
+  <div class="row"><div><label for="sp3">프로젝트</label><select id="sp3"></select></div><div><label for="sh3">커밋 해시 (비우면 기본 브랜치 최신)</label><input id="sh3" placeholder="예: a3f9c21"></div><div><label for="sa3">작업자</label><input id="sa3" maxlength="100"></div><div><button id="scan3">지금 스캔</button></div></div><div id="scanmsg" class="m"></div></div>
+ <div id="dl"></div></div>
 <div id="p2" hidden class="g">
  <form class="c" id="pf"><h2>프로젝트 등록 / 수정</h2>
   <label for="pn">이름 (SR의 대상 프로젝트로 선택됨)</label><input id="pn" required maxlength="100" placeholder="member-service">
@@ -49,8 +53,20 @@ const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt
 const ST={patch_generating:['수정안 생성 중','wait'],patch_ready:['수정안 승인 대기','wait'],patch_failed:['수정안 생성 실패','wait'],rejected:['반려','wait'],committed:['브랜치 커밋됨','ok'],mr_created:['MR 생성됨','ok'],analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
 const TY={code:'소스 수정',data:'데이터 수정',unknown:'판단 불가','':'-'};
 let cur=null,PROJECTS=[];
-const show2=t=>{$('p1').hidden=t!==1;$('p2').hidden=t!==2;if(t!==1)$('d').hidden=true;else if(cur)$('d').hidden=false;$('t1').setAttribute('aria-selected',t===1);$('t2').setAttribute('aria-selected',t===2)};
+const show2=t=>{$('p1').hidden=t!==1;$('p2').hidden=t!==2;$('p3').hidden=t!==3;$('t3').setAttribute('aria-selected',t===3);if(t!==1)$('d').hidden=true;else if(cur)$('d').hidden=false;$('t1').setAttribute('aria-selected',t===1);$('t2').setAttribute('aria-selected',t===2)};
 $('t1').onclick=()=>show2(1);$('t2').onclick=()=>{show2(2);loadProjects()};
+$('t3').onclick=async()=>{show2(3);await loadProjects();$('sp3').innerHTML=PROJECTS.map(p=>`<option>${E(p.name)}</option>`).join('');loadDocs()};
+const AL={update:'수정',fill:'채움',add:'추가',narrative:'본문 수정',missing:'소스에 없음',review:'확인 필요'};
+async function loadDocs(){const r=await api('/api/docs');
+ $('hookst').innerHTML=r.webhook_ready?'GitLab 웹훅 수신 가능 (POST /api/hooks/gitlab, X-Gitlab-Token 필요)':'웹훅 비활성: 서버 실행 전에 환경변수 <b>SSOT_WEBHOOK_SECRET</b> 을 설정하세요. 웹훅 없이도 아래 "지금 스캔"으로 사용할 수 있습니다.';
+ $('dl').innerHTML=r.items.map(d=>{const pend=d.status==='pending';return `<div class="c" style="margin-top:12px"><h2>${E(d.doc_path.split(/[\\/]/).pop())} <span class="pill ${pend?'wait':'ok'}">${{pending:'승인 대기',applied:'적용됨',dismissed:'보류'}[d.status]||E(d.status)}</span></h2>
+ <div class="m">${E(d.project)} · 커밋 ${E(d.commit_sha.slice(0,8))} · ${E(d.summary)}${d.sr_ids.length?' · SR '+d.sr_ids.map(i=>'SR-'+String(i).padStart(4,'0')).join(', '):''}${d.output?' · 저장: '+E(d.output):''}</div>
+ <div class="sc"><table><thead><tr>${pend?'<th></th>':''}<th>구분</th><th>위치/대상</th><th>이전</th><th>이후</th></tr></thead><tbody>${d.changes.map(c=>`<tr>${pend?`<td>${c.applicable&&c.action!=='narrative'?`<input type="checkbox" class="dc" data-p="${d.id}" value="${c.id}" checked>`:c.applicable?`<input type="checkbox" class="dc" data-p="${d.id}" value="${c.id}">`:''}</td>`:''}<td>${AL[c.action]||E(c.action)}</td><td>${E(c.where)}<br><b>${E(c.key)}</b> ${E(c.field)}</td><td class="err">${E(c.old)}</td><td class="ok">${E(c.new)}</td></tr>`).join('')}</tbody></table></div>
+ ${pend?`<div class="row"><div><label for="da${d.id}">승인자</label><input id="da${d.id}" maxlength="100"></div><div><label for="dr${d.id}">보류 사유(보류 시)</label><input id="dr${d.id}" maxlength="200"></div><div><button class="p" data-apply="${d.id}">선택 항목 적용 (새 파일로 저장)</button> <button data-dis="${d.id}">보류</button></div></div><div class="err" id="de${d.id}"></div>`:''}</div>`}).join('')||'<p class="m">아직 제안이 없습니다.</p>'}
+$('dl').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.apply||b.dataset.dis;if(!id)return;
+ try{if(b.dataset.apply)await post(`/api/docs/${id}/apply`,{actor:$('da'+id).value,accepted:[...document.querySelectorAll(`.dc[data-p="${id}"]:checked`)].map(x=>+x.value)});
+  else await post(`/api/docs/${id}/dismiss`,{actor:$('da'+id).value,reason:$('dr'+id).value});await loadDocs()}catch(x){$('de'+id).textContent=x.message}};
+$('scan3').onclick=async()=>{$('scanmsg').textContent='스캔 중… (AI 사용 시 수 분 걸릴 수 있습니다)';try{const r=await post('/api/docs/scan',{project:$('sp3').value,sha:$('sh3').value,actor:$('sa3').value});$('scanmsg').textContent=`제안 ${r.created}건 생성. ${r.note||''}`;loadDocs()}catch(x){$('scanmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
 async function loadProjects(){const {items}=await api('/api/projects');PROJECTS=items;
  const cur=$('project').value;$('project').innerHTML='<option value="">(지정 안 함)</option>'+items.map(p=>`<option>${E(p.name)}</option>`).join('');$('project').value=cur;
  $('plist').innerHTML=items.map(p=>`<div class="cand"><b>${E(p.name)}</b> <span class="m">${E(p.default_branch)}</span><div class="m mono">${E(p.local_path)}</div><div class="m">${E(p.gitlab_url||'GitLab 미지정')} · 토큰: ${E(p.token_env||'미지정')}</div><div class="row"><div><button data-chk="${E(p.name)}">연결 확인</button> <button data-edit="${E(p.name)}">수정</button> <button data-del="${E(p.name)}">삭제</button></div></div><div class="m" id="chk-${E(p.name)}"></div></div>`).join('')||'<p class="m">등록된 프로젝트가 없습니다. 왼쪽에서 등록하세요.</p>'}

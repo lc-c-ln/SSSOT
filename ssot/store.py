@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS sr_patch (
   commit_sha TEXT NOT NULL DEFAULT '', mr_url TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS doc_patch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, commit_sha TEXT NOT NULL, doc_path TEXT NOT NULL,
+  doc_sha TEXT NOT NULL, status TEXT NOT NULL, changes TEXT NOT NULL, sr_ids TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', decided_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project, commit_sha, doc_path)
+);
 CREATE TABLE IF NOT EXISTS embed_cache (sha TEXT NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (sha, model));
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
@@ -302,3 +308,47 @@ class Store:
         with self._lock:
             rows = self._db.execute("SELECT * FROM sr_patch WHERE sr_id=? ORDER BY id", (sr_id,)).fetchall()
         return [self._patch(r) for r in rows]
+
+    # ---- 문서 갱신 제안 ----
+    def create_doc_patch(self, project: str, commit_sha: str, doc_path: str, doc_sha: str, changes: list[dict],
+                         sr_ids: list[int], summary: str) -> int | None:
+        now = _now()
+        with self._lock:
+            try:
+                cur = self._db.execute(
+                    "INSERT INTO doc_patch(project, commit_sha, doc_path, doc_sha, status, changes, sr_ids, summary, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (project, commit_sha, doc_path, doc_sha, "pending", json.dumps(changes, ensure_ascii=False),
+                     json.dumps(sr_ids), summary, now, now))
+            except sqlite3.IntegrityError:    # 같은 커밋·문서는 한 번만 (웹훅 재전송 대비)
+                return None
+            self._db.commit()
+            return cur.lastrowid
+
+    @staticmethod
+    def _dp(r) -> dict:
+        d = dict(r)
+        d["changes"], d["sr_ids"] = json.loads(d["changes"]), json.loads(d["sr_ids"])
+        return d
+
+    def get_doc_patch(self, pid: int) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM doc_patch WHERE id=?", (pid,)).fetchone()
+        return self._dp(r) if r else None
+
+    def list_doc_patches(self, status: str | None = None) -> list[dict]:
+        with self._lock:
+            rows = (self._db.execute("SELECT * FROM doc_patch WHERE status=? ORDER BY id DESC LIMIT 200", (status,))
+                    if status else self._db.execute("SELECT * FROM doc_patch ORDER BY id DESC LIMIT 200")).fetchall()
+        return [self._dp(r) for r in rows]
+
+    def update_doc_patch(self, pid: int, **fields) -> None:
+        allowed = {"status", "output", "decided_by", "changes"}
+        if set(fields) - allowed:
+            raise ValueError(f"수정할 수 없는 필드: {set(fields) - allowed}")
+        if "changes" in fields and not isinstance(fields["changes"], str):
+            fields["changes"] = json.dumps(fields["changes"], ensure_ascii=False)
+        sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
+        with self._lock:
+            self._db.execute(f"UPDATE doc_patch SET {sets} WHERE id=?", (*fields.values(), _now(), pid))
+            self._db.commit()
