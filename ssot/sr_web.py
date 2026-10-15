@@ -4,7 +4,11 @@ POST /api/sr -> 접수 즉시 id 반환, 분류는 백그라운드 스레드에�
 """
 from __future__ import annotations
 
+import base64
 import csv
+import hashlib
+import hmac
+import time
 import io
 import json
 import re
@@ -302,7 +306,41 @@ class App:
         return "﻿" + buf.getvalue()   # Excel 에서 한글이 깨지지 않도록 BOM
 
 
-def make_handler(app: App):
+def load_users() -> dict[str, str]:
+    """SSOT_USERS="kim:비밀번호,lee:sha256:<hex>" 형식. 설정하면 모든 화면/API 가 로그인(Basic 인증)을 요구한다."""
+    out: dict[str, str] = {}
+    for item in os.environ.get("SSOT_USERS", "").split(","):
+        if ":" in item:
+            u, _, pw = item.strip().partition(":")
+            if u and pw:
+                out[u] = pw
+    return out
+
+
+def _pw_ok(stored: str, given: str) -> bool:
+    if stored.startswith("sha256:"):
+        return hmac.compare_digest(stored[7:].lower(), hashlib.sha256(given.encode("utf-8")).hexdigest())
+    return hmac.compare_digest(stored.encode("utf-8"), given.encode("utf-8"))
+
+
+class Throttle:
+    """로그인 실패가 반복되는 클라이언트를 잠시 막는다 (무차별 대입 완화)."""
+
+    def __init__(self, limit: int = 5, window: int = 300):
+        self.limit, self.window, self.fails = limit, window, {}
+
+    def blocked(self, key: str) -> bool:
+        now = time.time()
+        self.fails[key] = [t for t in self.fails.get(key, []) if now - t < self.window]
+        return len(self.fails[key]) >= self.limit
+
+    def fail(self, key: str) -> None:
+        self.fails.setdefault(key, []).append(time.time())
+
+
+def make_handler(app: App, users: dict[str, str] | None = None):
+    users = users or {}
+    throttle = Throttle()
     class Handler(BaseHTTPRequestHandler):
         server_version = "ssot-sr"
 
@@ -336,6 +374,27 @@ def make_handler(app: App):
             except Exception as e:  # noqa: BLE001
                 self._json(500, {"error": f"{type(e).__name__}: {e}"})
 
+        def _auth(self) -> str | None:
+            """인증이 켜져 있으면 사용자 이름, 꺼져 있으면 ''. 실패하면 None(응답까지 보냄)."""
+            if not users:
+                return ""
+            ip = self.client_address[0]
+            if throttle.blocked(ip):
+                self._json(429, {"error": "로그인 실패가 반복되어 잠시 차단되었습니다. 5분 뒤 다시 시도하세요."})
+                return None
+            h = self.headers.get("Authorization", "")
+            if h.startswith("Basic "):
+                try:
+                    u, _, pw = base64.b64decode(h[6:]).decode("utf-8").partition(":")
+                except Exception:  # noqa: BLE001
+                    u, pw = "", ""
+                if u in users and _pw_ok(users[u], pw):
+                    return u
+                throttle.fail(ip)
+            self._send(401, b'{"error":"login required"}', "application/json; charset=utf-8",
+                       {"WWW-Authenticate": 'Basic realm="SSSOT", charset="UTF-8"'})
+            return None
+
         def _same_origin(self) -> bool:
             """브라우저의 교차 출처 POST(CSRF) 차단: Origin 이 있으면 Host 와 같아야 한다."""
             origin = self.headers.get("Origin")
@@ -343,6 +402,11 @@ def make_handler(app: App):
 
         def do_GET(self):  # noqa: N802
             path = urlparse(self.path).path
+            user = self._auth()
+            if user is None:
+                return
+            if path == "/api/whoami":
+                return self._json(200, {"user": user})
             if path in ("/", "/index.html"):
                 return self._send(200, (STATIC / "sr.html").read_bytes(), "text/html; charset=utf-8")
             if path == "/api/status":
@@ -374,11 +438,20 @@ def make_handler(app: App):
                 return self._json(413, {"error": "요청이 너무 큽니다."})
             raw = self.rfile.read(n).decode("utf-8") if n else "{}"
             path = urlparse(self.path).path
+            user = ""
+            if path != "/api/hooks/gitlab":     # 웹훅은 자체 비밀 토큰으로 인증
+                user = self._auth()
+                if user is None:
+                    return
 
             def body() -> dict:
                 d = json.loads(raw or "{}")
                 if not isinstance(d, dict):
                     raise ValueError("JSON 객체가 필요합니다.")
+                if user:     # 로그인한 사용자가 있으면 입력한 이름이 아니라 인증된 이름을 쓴다(사칭 방지)
+                    d["actor"] = user
+                    if path == "/api/sr":
+                        d["requester"] = user
                 return d
 
             if path == "/api/sr":
@@ -413,13 +486,19 @@ def make_handler(app: App):
 
 
 def serve(db: str, host: str = "127.0.0.1", port: int = 8766, ollama_host: str | None = None,
-          model: str | None = None, mask: bool = True, allow_self_approve: bool = False) -> None:
+          model: str | None = None, mask: bool = True, allow_self_approve: bool = False,
+          insecure_no_auth: bool = False) -> None:
     from .ollama import OllamaLLM
+    users = load_users()
+    if host not in ("127.0.0.1", "localhost", "::1") and not users and not insecure_no_auth:
+        raise SystemExit("외부에서 접속 가능한 주소(--host)로 열려면 로그인 설정이 필요합니다. 서버 실행 전에 환경변수 "
+                         "SSOT_USERS=\"kim:비밀번호,lee:비밀번호\" 를 설정하세요. (사내망 테스트용: --insecure-no-auth)")
     app = App(Store(db, mask=mask), OllamaLLM(host=ollama_host, model=model), allow_self_approve=allow_self_approve)
-    srv = ThreadingHTTPServer((host, port), make_handler(app))
+    srv = ThreadingHTTPServer((host, port), make_handler(app, users))
     print(f"SR 접수 서버: http://{host}:{port}  (DB: {db}, 모델: {app.llm.model}, 종료: Ctrl+C)")
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        print("경고: 인증이 없습니다. 사내망 안에서만 사용하세요.")
+    print(f"로그인: {'사용자 ' + str(len(users)) + '명 (Basic 인증)' if users else '없음 (이 PC 에서만 접속)'}")
+    if host not in ("127.0.0.1", "localhost", "::1") and not users:
+        print("경고: 인증 없이 외부에 열려 있습니다. 사내망 안에서만 사용하세요.")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

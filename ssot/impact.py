@@ -134,10 +134,16 @@ def _unpack(b: bytes) -> list[float]:
     return list(a)
 
 
+_sumprod = getattr(math, "sumprod", None)   # Python 3.12+ : C 구현으로 훨씬 빠르다
+
+
+def _dot(a: list[float], b: list[float]) -> float:
+    return _sumprod(a, b) if _sumprod else sum(x * y for x, y in zip(a, b))
+
+
 def _cos(a: list[float], b: list[float]) -> float:
-    d = sum(x * y for x, y in zip(a, b))
-    na, nb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(y * y for y in b))
-    return d / (na * nb) if na and nb else 0.0
+    na, nb = math.sqrt(_dot(a, a)), math.sqrt(_dot(b, b))
+    return _dot(a, b) / (na * nb) if na and nb else 0.0
 
 
 def embed_chunks(store: Store, llm, chunks: list[Chunk]) -> list[list[float]]:
@@ -174,11 +180,40 @@ def expand_keywords(llm: LLM, title: str, body: str) -> tuple[list[str], dict]:
         return [], {**detail, "error": f"{type(e).__name__}: {e}"}
 
 
-def search(store: Store, llm, root: Path, title: str, body: str, keywords: list[str]) -> tuple[list[dict], bool, str]:
+_INDEX: dict[str, tuple[tuple, list[Chunk], BM25]] = {}
+
+
+def _fingerprint(root: Path) -> tuple:
+    n, total, newest = 0, 0, 0.0
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in (".java", ".xml", ".yml", ".yaml", ".properties"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            n, total, newest = n + 1, total + st.st_size, max(newest, st.st_mtime)
+    return (n, total, newest)
+
+
+def get_index(root: Path) -> tuple[list[Chunk], BM25]:
+    """프로젝트 색인(청크 + BM25)을 파일 변경이 없으면 메모리에서 재사용한다."""
+    fp = _fingerprint(root)
+    key = str(root.resolve())
+    hit = _INDEX.get(key)
+    if hit and hit[0] == fp:
+        return hit[1], hit[2]
     chunks = build_chunks(root)
+    bm = BM25([tokens(c.text) for c in chunks])
+    _INDEX[key] = (fp, chunks, bm)
+    while len(_INDEX) > 8:
+        _INDEX.pop(next(iter(_INDEX)))
+    return chunks, bm
+
+
+def search(store: Store, llm, root: Path, title: str, body: str, keywords: list[str]) -> tuple[list[dict], bool, str]:
+    chunks, bm = get_index(root)
     if not chunks:
         return [], False, "색인할 Java/XML/설정 파일이 없습니다."
-    bm = BM25([tokens(c.text) for c in chunks])
     q: dict[str, float] = {}
     for t in tokens(f"{title} {body}"):
         q[t] = max(q.get(t, 0), 0.5)

@@ -53,7 +53,9 @@ const $=id=>document.getElementById(id);
 const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ST={data_analyzing:['테이블 분석 중','wait'],data_ready:['SQL 안 확인 대기','wait'],data_error:['데이터 분석 오류','wait'],data_done:['처리 완료(담당자 보고)','ok'],patch_generating:['수정안 생성 중','wait'],patch_ready:['수정안 승인 대기','wait'],patch_failed:['수정안 생성 실패','wait'],rejected:['반려','wait'],committed:['브랜치 커밋됨','ok'],mr_created:['MR 생성됨','ok'],analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
 const TY={code:'소스 수정',data:'데이터 수정',unknown:'판단 불가','':'-'};
-let cur=null,PROJECTS=[],DATA=null;
+let cur=null,PROJECTS=[],DATA=null,ME='';
+function lockMe(){if(!ME)return;for(const id of ['requester','pa','sa3','actor']){const e=$(id);if(e){e.value=ME;e.readOnly=true}}}
+api('/api/whoami').then(r=>{ME=r.user||'';lockMe();if(ME)$('st').dataset.me=ME}).catch(()=>{});
 const show2=t=>{$('p1').hidden=t!==1;$('p2').hidden=t!==2;$('p3').hidden=t!==3;$('t3').setAttribute('aria-selected',t===3);if(t!==1)$('d').hidden=true;else if(cur)$('d').hidden=false;$('t1').setAttribute('aria-selected',t===1);$('t2').setAttribute('aria-selected',t===2)};
 $('t1').onclick=()=>show2(1);$('t2').onclick=()=>{show2(2);loadProjects()};
 $('t3').onclick=async()=>{show2(3);await loadProjects();$('sp3').innerHTML=PROJECTS.map(p=>`<option>${E(p.name)}</option>`).join('');loadDocs()};
@@ -137,6 +139,7 @@ async function show(id){cur=id;const {sr,audit,impact,patches,self_approve,data}
  <div><label for="mn">사유(선택)</label><input id="mn" maxlength="200"></div><div><button id="mset">분류 저장</button> ${(need||pend)?'<button id="mretry">AI 재분류</button>':''}</div></div><div id="dm" class="err"></div>`}
  <h2 style="margin-top:14px">처리 이력 <a class="m" href="/api/sr/${sr.id}/audit.csv">CSV</a></h2>
  ${audit.map(a=>`<details><summary>${E(a.ts.replace('T',' ').slice(0,19))} · ${E(a.actor)} · <b>${E(a.event)}</b></summary><pre>${E(JSON.stringify(a.detail,null,2))}</pre></details>`).join('')}`;
+ lockMe();
  const f=(fn)=>async()=>{try{await fn();await show(id);await list()}catch(e){$('dm').textContent=e.message}};
   if($('sproj'))$('sproj').onclick=f(()=>post(`/api/sr/${id}/project`,{actor:$('actor')?.value||'',project:$('sp').value}));
  if($('sana'))$('sana').onclick=f(()=>post(`/api/sr/${id}/analyze`,{actor:$('actor')?.value||''}));

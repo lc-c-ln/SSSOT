@@ -43,6 +43,8 @@ python -m ssot sr                # http://127.0.0.1:8766  (DB: ssot_sr.db, 로�
 - 실제 DB 메타데이터 조회(선택): `pip install oracledb` 후 프로젝트 설정의 *환경변수 접두어*(예: `MEMBER`)를 지정하고 `SSOT_DB_MEMBER_USER`, `SSOT_DB_MEMBER_PASSWORD`, `SSOT_DB_MEMBER_DSN`(host:1521/서비스명), 선택 `SSOT_DB_MEMBER_OWNER` 를 설정합니다. **읽기 전용 계정**을 쓰세요. 딕셔너리 뷰만 조회하고 업무 데이터 행은 읽지 않습니다. 문서와 DB 가 다르면 불일치 목록을 보여주며 기본은 DB 우선입니다(`SSOT_SCHEMA_PRIORITY=doc` 로 반전).
 - 담당자가 SQL 을 직접 실행한 뒤 *실행 완료로 기록*(처리 건수, 메모)하면 감사 로그에 "담당자 보고"로 남습니다.
 
+운영(로그인·웹훅·Oracle 계정·백업·문제 해결)은 **[docs/OPERATIONS.md](docs/OPERATIONS.md)** 를 보세요. 외부 주소(`--host 0.0.0.0`)로 열려면 `SSOT_USERS` 로그인 설정이 필수입니다.
+
 환경변수: `OLLAMA_HOST`, `SSOT_MODEL`(기본 qwen2.5-coder:7b), `SSOT_NUM_CTX`, `SSOT_LOCAL_ONLY=1`(외부 LLM 차단). 로컬/사설망이 아닌 Ollama 주소는 거부됩니다.
 
 ## 동작 원칙
