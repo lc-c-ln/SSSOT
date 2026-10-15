@@ -15,7 +15,7 @@ tr.r{cursor:pointer}tr.r:hover,tr.sel{background:var(--bg)}.sc{overflow-x:auto}
 .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:#e6ecfc;color:var(--acc)}.pill.ok{background:#dcf3ef;color:var(--ok)}.pill.wait{background:#fdf0dc;color:var(--wait)}
 .m{color:var(--mut);font-size:12px}.err{color:var(--bad);font-weight:600}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}.row>*{flex:1 1 140px}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;max-height:240px;overflow:auto;margin:4px 0 0}
-details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]{border-color:var(--acc);color:var(--acc);font-weight:600}.ok{color:var(--ok)}.cand{border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:6px 0}.cand label{display:flex;gap:8px;align-items:center;margin:0;color:var(--ink);font-size:14px}.cand input{width:auto}summary{cursor:pointer}
+details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]{border-color:var(--acc);color:var(--acc);font-weight:600}.ok{color:var(--ok)}.cand{border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:6px 0}.cand label{display:flex;gap:8px;align-items:center;margin:0;color:var(--ink);font-size:14px}.cand input{width:auto}.diff{font:12px/1.45 ui-monospace,Consolas,monospace;border:1px solid var(--line);border-radius:6px;overflow-x:auto;margin:6px 0}.diff div{padding:0 8px;white-space:pre}.diff .a{background:#e2f5e8;color:#0d6b3a}.diff .d{background:#fbe5e6;color:#a4262c}.diff .h{background:var(--bg);color:var(--mut)}summary{cursor:pointer}
 </style></head><body><div class="w">
 <div><h1>SR 접수</h1><div class="m" id="st">상태 확인 중…</div></div>
 <div class="tabs"><button id="t1" aria-selected="true">요청</button><button id="t2" aria-selected="false">프로젝트 설정</button></div>
@@ -46,7 +46,7 @@ details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]
 <script>
 const $=id=>document.getElementById(id);
 const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const ST={analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
+const ST={patch_generating:['수정안 생성 중','wait'],patch_ready:['수정안 승인 대기','wait'],patch_failed:['수정안 생성 실패','wait'],rejected:['반려','wait'],committed:['브랜치 커밋됨','ok'],mr_created:['MR 생성됨','ok'],analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
 const TY={code:'소스 수정',data:'데이터 수정',unknown:'판단 불가','':'-'};
 let cur=null,PROJECTS=[];
 const show2=t=>{$('p1').hidden=t!==1;$('p2').hidden=t!==2;if(t!==1)$('d').hidden=true;else if(cur)$('d').hidden=false;$('t1').setAttribute('aria-selected',t===1);$('t2').setAttribute('aria-selected',t===2)};
@@ -63,6 +63,20 @@ $('pf').onsubmit=async e=>{e.preventDefault();try{const r=await post('/api/proje
  $('pmsg').innerHTML=chkText(r.check);await loadProjects()}catch(x){$('pmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
 async function api(p,o){const r=await fetch(p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 const post=(p,b)=>api(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
+function diffHtml(t){return '<div class="diff">'+t.split('\n').map(l=>`<div class="${l.startsWith('+++')||l.startsWith('---')||l.startsWith('@@')?'h':l[0]==='+'?'a':l[0]==='-'?'d':''}">${E(l)||' '}</div>`).join('')+'</div>'}
+function patchHtml(sr,patches,selfOk){
+ if(!patches||!patches.length)return sr.status==='patch_generating'?'<p class="m">수정안 생성 중… (모델 속도에 따라 수 분 걸릴 수 있습니다)</p>':'';
+ const p=patches[patches.length-1];let h=`<h2 style="margin-top:14px">수정안 v${p.version} <span class="pill ${p.status==='proposed'?'wait':p.status==='failed'||p.status==='rejected'?'wait':'ok'}">${{generating:'생성 중',proposed:'승인 대기',failed:'생성 실패',superseded:'수정 요구됨',rejected:'반려됨',committed:'브랜치 커밋됨',published:'MR 생성됨'}[p.status]||E(p.status)}</span></h2>`;
+ if(p.status==='generating')return h+'<p class="m">생성 중…</p>';
+ if(p.error)h+=`<p class="err">${E(p.error)}</p>`;
+ if(p.explanation)h+=`<p><b>수정 이유</b> ${E(p.explanation)}</p>`;
+ if(p.warnings.length)h+=`<div class="cand"><b>확인 필요</b><ul>${p.warnings.map(w=>'<li>'+E(w)+'</li>').join('')}</ul></div>`;
+ if(p.diff)h+=`<div class="m">${p.stats.files.map(E).join(', ')} · +${p.stats.additions} −${p.stats.deletions}</div>${diffHtml(p.diff)}`;
+ if(p.status==='proposed'){h+=`<div class="row"><div><label for="pnote">코멘트 (수정 요구/반려 시 필수)</label><input id="pnote" maxlength="500"></div></div><div class="btns"><button class="p" id="pok">승인</button> <button id="prev">수정 요구</button> <button id="prej">반려</button></div>${selfOk?'':'<p class="m">요청자 본인은 승인할 수 없습니다.</p>'}`}
+ if(p.status==='failed'||sr.status==='patch_failed')h+=`<div class="row"><div><label for="pnote">피드백(선택)</label><input id="pnote" maxlength="500"></div><div><button id="pgen">수정안 다시 생성</button></div></div>`;
+ if(p.status==='committed'||p.status==='published'){h+=`<p>브랜치 <b class="mono">${E(p.branch)}</b> · 커밋 <span class="mono">${E(p.commit_sha.slice(0,8))}</span> · 승인 ${E(p.decided_by)}</p>`;
+  h+=p.mr_url?`<p>Merge Request: <a href="${E(p.mr_url)}" target="_blank" rel="noopener">${E(p.mr_url)}</a></p>`:`<p class="m">${E(sr.reason)}</p><button id="ppub">GitLab에 push 후 MR 생성</button>`}
+ return h}
 function impactHtml(sr,imp){
  if(sr.sr_type!=='code'||['classifying','received','pending_llm'].includes(sr.status))return sr.sr_type==='data'?'<p class="m">데이터 수정 건: 테이블 분석은 다음 단계에서 제공됩니다.</p>':'';
  const opts=PROJECTS.map(p=>`<option ${p.name===sr.project?'selected':''}>${E(p.name)}</option>`).join('');
@@ -78,14 +92,15 @@ async function status(){try{const s=await api('/api/status');const o=s.ollama;
  $('st').innerHTML=(o.ok?`Ollama 연결됨 · 모델 ${E(o.model)} ${o.model_ready?'':'<span class="err">(미설치: ollama pull)</span>'}`:`<span class="err">Ollama 연결 안 됨</span> (${E(o.error||'')})`)+` · 감사 로그 ${s.audit.ok?'무결성 정상 ('+s.audit.count+'건)':'<span class="err">변조 의심: #'+s.audit.broken_at+'</span>'}`}catch(e){$('st').textContent=e.message}}
 async function list(){const {items}=await api('/api/sr');
  $('list').innerHTML=items.map(r=>`<tr class="r ${cur===r.id?'sel':''}" data-id="${r.id}"><td>SR-${String(r.id).padStart(4,'0')}</td><td>${E(r.title)}<div class="m">${E(r.requester)}</div></td><td>${pill(r.status)}</td><td>${TY[r.sr_type]||'-'}</td></tr>`).join('')||'<tr><td colspan="4" class="m">아직 요청이 없습니다.</td></tr>'}
-async function show(id){cur=id;const {sr,audit,impact}=await api('/api/sr/'+id);const d=$('d');d.hidden=false;
+async function show(id){cur=id;const {sr,audit,impact,patches,self_approve}=await api('/api/sr/'+id);const d=$('d');d.hidden=false;
  const need=sr.status==='needs_review',pend=sr.status==='pending_llm';
  d.innerHTML=`<h2>SR-${String(sr.id).padStart(4,'0')} ${E(sr.title)} ${pill(sr.status)}</h2>
  <div class="m">${E(sr.requester)} · ${E(sr.project||'-')} · ${E(sr.created_at)}</div><pre>${E(sr.body)}</pre>
  <p>자동 분류: <b>${TY[sr.sr_type]||'-'}</b>${sr.confidence!=null?` (신뢰도 ${Number(sr.confidence).toFixed(2)})`:''} <span class="m">${E(sr.reason)}</span></p>
  <p class="m">대상 프로젝트: <b>${E(sr.project||'-')}</b>${sr.reason&&/영향|프로젝트|경로/.test(sr.reason)?' · '+E(sr.reason):''}</p>
  ${impactHtml(sr,impact)}
- ${sr.status==='classifying'||sr.status==='received'?'':`<div class="row"><div><label for="actor">담당자</label><input id="actor" maxlength="100"></div>
+ ${patchHtml(sr,patches,self_approve)}
+ ${['classifying','received','analyzing','patch_generating'].includes(sr.status)?'':`<div class="row"><div><label for="actor">담당자</label><input id="actor" maxlength="100"></div>
  <div><label for="mt">유형 지정/변경</label><select id="mt"><option value="code">소스 수정</option><option value="data">데이터 수정</option></select></div>
  <div><label for="mn">사유(선택)</label><input id="mn" maxlength="200"></div><div><button id="mset">분류 저장</button> ${(need||pend)?'<button id="mretry">AI 재분류</button>':''}</div></div><div id="dm" class="err"></div>`}
  <h2 style="margin-top:14px">처리 이력 <a class="m" href="/api/sr/${sr.id}/audit.csv">CSV</a></h2>
@@ -95,6 +110,11 @@ async function show(id){cur=id;const {sr,audit,impact}=await api('/api/sr/'+id);
  if($('sana'))$('sana').onclick=f(()=>post(`/api/sr/${id}/analyze`,{actor:$('actor')?.value||''}));
  if($('xadd'))$('xadd').onclick=()=>{const v=$('xf').value.trim();if(!v)return;const l=document.createElement('div');l.className='cand';l.innerHTML=`<label><input type="checkbox" class="cf" value="${E(v)}" checked> <b class="mono">${E(v)}</b> <span class="pill">직접 추가</span></label>`;$('xadd').closest('.row').before(l);$('xf').value=''};
  if($('xok'))$('xok').onclick=f(()=>post(`/api/sr/${id}/impact`,{actor:$('actor')?.value||'',files:[...document.querySelectorAll('.cf:checked')].map(x=>x.value)}));
+ const act=()=>$('actor')?.value||'';
+ const dec=d=>f(()=>post(`/api/sr/${id}/patch/decide`,{actor:act(),patch_id:patches[patches.length-1].id,decision:d,note:$('pnote')?.value||''}));
+ if($('pok'))$('pok').onclick=dec('approve');if($('prev'))$('prev').onclick=dec('revise');if($('prej'))$('prej').onclick=dec('reject');
+ if($('pgen'))$('pgen').onclick=f(()=>post(`/api/sr/${id}/patch/generate`,{actor:act(),feedback:$('pnote')?.value||''}));
+ if($('ppub'))$('ppub').onclick=f(()=>post(`/api/sr/${id}/patch/publish`,{actor:act()}));
  if($('mset'))$('mset').onclick=f(()=>post(`/api/sr/${id}/classify`,{actor:$('actor').value,type:$('mt').value,note:$('mn').value}));
  if($('mretry'))$('mretry').onclick=f(()=>post(`/api/sr/${id}/retry`,{actor:$('actor').value||'unknown'}));
  list()}
@@ -102,6 +122,6 @@ $('list').onclick=e=>{const t=e.target.closest('tr.r');if(t)show(+t.dataset.id)}
 $('f').onsubmit=async e=>{e.preventDefault();$('fmsg').textContent='';try{
  const r=await post('/api/sr',{requester:$('requester').value,project:$('project').value,title:$('title').value,body:$('body').value});
  $('title').value='';$('body').value='';$('fmsg').textContent='등록되었습니다. AI가 분류하는 중…';await list();show(r.id)}catch(x){$('fmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
-setInterval(()=>{list();status();if(cur){const s=document.querySelector('.pill.wait');if(s&&/분류 중/.test($('d').textContent))show(cur)}},4000);
+setInterval(()=>{list();status();if(cur&&/분류 중|영향 분석 중|수정안 생성 중|생성 중/.test($('d').textContent)&&document.activeElement.tagName!=='INPUT')show(cur)},4000);
 status();list();loadProjects();
 </script></body></html>

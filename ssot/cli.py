@@ -101,7 +101,7 @@ def cmd_web(a) -> int:
 
 def cmd_sr(a) -> int:
     from .sr_web import serve
-    serve(a.db, a.host, a.port, a.ollama_host, a.model, mask=not a.no_mask)
+    serve(a.db, a.host, a.port, a.ollama_host, a.model, mask=not a.no_mask, allow_self_approve=a.allow_self_approve)
     return 0
 
 
@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--ollama-host", help="기본 OLLAMA_HOST 또는 http://localhost:11434")
     sr.add_argument("--model", help="분류에 쓸 모델 (기본 SSOT_MODEL 또는 qwen2.5-coder:7b)")
     sr.add_argument("--no-mask", action="store_true", help="감사 로그의 비밀값 마스킹 끄기")
+    sr.add_argument("--allow-self-approve", action="store_true", help="요청자 본인의 승인을 허용 (기본: 금지)")
     sr.set_defaults(fn=cmd_sr)
     a = ap.parse_args(argv)
     return a.fn(a)

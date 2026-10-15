@@ -17,7 +17,9 @@ import os
 import subprocess
 
 from .classify import process_sr, set_manual
+from .gitlab import PublishError, publish
 from .impact import analyze_sr, confirm_selection
+from .patch import decide, generate_patch
 from .llm import LLM
 from .store import Store
 
@@ -26,8 +28,9 @@ MAX_BODY = 2 * 1024 * 1024
 
 
 class App:
-    def __init__(self, store: Store, llm: LLM, sync_mode: bool = False):
+    def __init__(self, store: Store, llm: LLM, sync_mode: bool = False, allow_self_approve: bool = False):
         self.store, self.llm, self.sync_mode = store, llm, sync_mode
+        self.allow_self_approve = allow_self_approve
         self._classify_lock = threading.Lock()   # 로컬 GPU 하나이므로 분류 호출은 한 번에 하나씩
 
     def run_classify(self, sr_id: int) -> None:
@@ -70,7 +73,8 @@ class App:
         sr = self.store.get_sr(sr_id)
         if not sr:
             raise LookupError("SR 을 찾을 수 없습니다.")
-        return {"sr": sr, "audit": self.store.audit_rows(sr_id), "impact": self.store.get_impact(sr_id)}
+        return {"sr": sr, "audit": self.store.audit_rows(sr_id), "impact": self.store.get_impact(sr_id),
+                "patches": self.store.list_patches(sr_id), "self_approve": self.allow_self_approve}
 
     # ---- 프로젝트 / 영향 분석 ----
     def projects(self) -> dict:
@@ -140,6 +144,51 @@ class App:
 
     def confirm_impact(self, sr_id: int, p: dict) -> dict:
         confirm_selection(self.store, sr_id, str(p.get("actor", "")), [str(f) for f in p.get("files", [])])
+        self.start_patch(sr_id)
+        return self.detail(sr_id)
+
+    # ---- 수정안 ----
+    def run_patch(self, sr_id: int, feedback: str = "") -> None:
+        with self._classify_lock:
+            try:
+                generate_patch(self.store, self.llm, sr_id, feedback)
+            except Exception as e:  # noqa: BLE001
+                self.store.audit(sr_id, "system", "patch.crashed", {"error": f"{type(e).__name__}: {e}"})
+                self.store.update_sr(sr_id, status="patch_failed", reason=f"처리 오류: {e}"[:300])
+
+    def start_patch(self, sr_id: int, feedback: str = "") -> None:
+        self.store.update_sr(sr_id, status="patch_generating")
+        if self.sync_mode:
+            self.run_patch(sr_id, feedback)
+        else:
+            threading.Thread(target=self.run_patch, args=(sr_id, feedback), daemon=True).start()
+
+    def patch_generate(self, sr_id: int, p: dict) -> dict:
+        sr = self.store.get_sr(sr_id)
+        if not sr or sr["status"] not in ("impact_confirmed", "patch_failed"):
+            raise ValueError("대상 파일이 확정된 SR 만 수정안을 만들 수 있습니다.")
+        self.store.audit(sr_id, str(p.get("actor", "")).strip() or "unknown", "patch.requested",
+                         {"feedback": str(p.get("feedback", ""))})
+        self.start_patch(sr_id, str(p.get("feedback", "")).strip())
+        return {"ok": True}
+
+    def patch_decide(self, sr_id: int, p: dict) -> dict:
+        result = decide(self.store, sr_id, int(p.get("patch_id", 0)), str(p.get("actor", "")),
+                        str(p.get("decision", "")), str(p.get("note", "")), self.allow_self_approve)
+        if result == "revise":
+            self.start_patch(sr_id, str(p.get("note", "")).strip())
+        elif result == "approved":
+            try:
+                publish(self.store, sr_id, str(p.get("actor", "")).strip())
+            except PublishError as e:   # 로컬 커밋은 성공. 토큰/네트워크 문제는 나중에 재시도
+                self.store.update_sr(sr_id, reason=f"브랜치 커밋됨, GitLab 반영 대기: {e}"[:300])
+        return self.detail(sr_id)
+
+    def patch_publish(self, sr_id: int, p: dict) -> dict:
+        try:
+            publish(self.store, sr_id, str(p.get("actor", "")).strip())
+        except PublishError as e:
+            raise ValueError(str(e)) from e
         return self.detail(sr_id)
 
     def classify_manual(self, sr_id: int, p: dict) -> dict:
@@ -253,10 +302,12 @@ def make_handler(app: App):
                 return self._guard(lambda: app.save_project(body()))
             if path == "/api/projects/delete":
                 return self._guard(lambda: app.delete_project(body()))
-            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project)", path)
+            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project|patch/generate|patch/decide|patch/publish)", path)
             if m:
                 fn = {"classify": app.classify_manual, "retry": app.retry, "analyze": app.analyze,
-                      "impact": app.confirm_impact, "project": app.set_project}[m.group(2)]
+                      "impact": app.confirm_impact, "project": app.set_project,
+                      "patch/generate": app.patch_generate, "patch/decide": app.patch_decide,
+                      "patch/publish": app.patch_publish}[m.group(2)]
                 return self._guard(lambda: fn(int(m.group(1)), body()))
             self._json(404, {"error": "not found"})
 
@@ -264,9 +315,9 @@ def make_handler(app: App):
 
 
 def serve(db: str, host: str = "127.0.0.1", port: int = 8766, ollama_host: str | None = None,
-          model: str | None = None, mask: bool = True) -> None:
+          model: str | None = None, mask: bool = True, allow_self_approve: bool = False) -> None:
     from .ollama import OllamaLLM
-    app = App(Store(db, mask=mask), OllamaLLM(host=ollama_host, model=model))
+    app = App(Store(db, mask=mask), OllamaLLM(host=ollama_host, model=model), allow_self_approve=allow_self_approve)
     srv = ThreadingHTTPServer((host, port), make_handler(app))
     print(f"SR 접수 서버: http://{host}:{port}  (DB: {db}, 모델: {app.llm.model}, 종료: Ctrl+C)")
     if host not in ("127.0.0.1", "localhost", "::1"):

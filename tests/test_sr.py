@@ -271,7 +271,7 @@ def test_web_projects_and_impact(server, tmp_path):
     assert d["sr"]["status"] == "impact_ready" and d["impact"]["candidates"]
     f = d["impact"]["candidates"][0]["file"]
     d = json.loads(call(f"{base}/api/sr/{sid}/impact", {"actor": "김담당", "files": [f]})[1])
-    assert d["sr"]["status"] == "impact_confirmed"
+    assert d["sr"]["status"] == "patch_failed"          # 확정 즉시 수정안 생성 시도(이 픽스처는 git 저장소가 아님)
     assert call(f"{base}/api/sr/{sid}/impact", {"actor": "김담당", "files": ["../x"]})[0] == 400
     assert call(f"{base}/api/sr/{sid}/project", {"actor": "", "project": "acme/user"})[0] == 400
     assert call(base + "/api/projects/delete", {"name": "acme/user", "actor": "a"})[0] == 200

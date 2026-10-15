@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS sr_impact (
   sr_id INTEGER PRIMARY KEY, keywords TEXT NOT NULL, candidates TEXT NOT NULL, selected TEXT NOT NULL DEFAULT '[]',
   vector_used INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sr_patch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, sr_id INTEGER NOT NULL, version INTEGER NOT NULL,
+  status TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', diff TEXT NOT NULL DEFAULT '',
+  stats TEXT NOT NULL DEFAULT '{}', warnings TEXT NOT NULL DEFAULT '[]', feedback TEXT NOT NULL DEFAULT '',
+  decided_by TEXT NOT NULL DEFAULT '', decision_note TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '',
+  commit_sha TEXT NOT NULL DEFAULT '', mr_url TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS embed_cache (sha TEXT NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (sha, model));
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
@@ -43,7 +51,8 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 """
 
 STATUSES = {"received", "classifying", "classified", "needs_review", "pending_llm",
-            "analyzing", "impact_ready", "impact_error", "impact_confirmed"}
+            "analyzing", "impact_ready", "impact_error", "impact_confirmed",
+            "patch_generating", "patch_ready", "patch_failed", "rejected", "committed", "mr_created"}
 TYPES = {"code", "data", "unknown"}
 
 _SECRET_PATTERNS = [
@@ -252,3 +261,44 @@ class Store:
             self._db.executemany("INSERT OR REPLACE INTO embed_cache(sha, model, vec) VALUES (?,?,?)",
                                  [(k, model, v) for k, v in items.items()])
             self._db.commit()
+
+    # ---- 수정안(Diff) ----
+    def create_patch(self, sr_id: int, feedback: str = "") -> int:
+        with self._lock:
+            v = (self._db.execute("SELECT COALESCE(MAX(version),0) FROM sr_patch WHERE sr_id=?", (sr_id,)).fetchone()[0]) + 1
+            now = _now()
+            cur = self._db.execute(
+                "INSERT INTO sr_patch(sr_id, version, status, feedback, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                (sr_id, v, "generating", feedback, now, now))
+            self._db.commit()
+            return cur.lastrowid
+
+    _PATCH_FIELDS = {"status", "explanation", "diff", "stats", "warnings", "decided_by", "decision_note",
+                     "branch", "commit_sha", "mr_url", "error"}
+
+    def update_patch(self, patch_id: int, **fields) -> None:
+        if set(fields) - self._PATCH_FIELDS:
+            raise ValueError(f"수정할 수 없는 필드: {set(fields) - self._PATCH_FIELDS}")
+        for k in ("stats", "warnings"):
+            if k in fields and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k], ensure_ascii=False)
+        sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
+        with self._lock:
+            self._db.execute(f"UPDATE sr_patch SET {sets} WHERE id=?", (*fields.values(), _now(), patch_id))
+            self._db.commit()
+
+    @staticmethod
+    def _patch(r) -> dict:
+        d = dict(r)
+        d["stats"], d["warnings"] = json.loads(d["stats"]), json.loads(d["warnings"])
+        return d
+
+    def get_patch(self, patch_id: int) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM sr_patch WHERE id=?", (patch_id,)).fetchone()
+        return self._patch(r) if r else None
+
+    def list_patches(self, sr_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM sr_patch WHERE sr_id=? ORDER BY id", (sr_id,)).fetchall()
+        return [self._patch(r) for r in rows]
