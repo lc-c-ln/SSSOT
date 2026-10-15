@@ -241,3 +241,14 @@ def test_web_flow(server):
                 headers={"Origin": "http://evil.example"})[0] == 403
     assert call(f"{base}/api/sr/{sid}/retry", {"actor": "x"})[0] == 400   # classified 상태는 재시도 불가
     assert b"SR" in call(base + "/")[1]
+
+
+def test_client_abort_is_silent(server):
+    import socket
+    base, _ = server
+    host, port = base.replace("http://", "").split(":")
+    for _ in range(3):   # 요청만 보내고 응답을 받기 전에 끊는다
+        c = socket.create_connection((host, int(port)))
+        c.sendall(b"GET /api/status HTTP/1.1\r\nHost: x\r\n\r\n")
+        c.close()
+    assert call(base + "/api/sr")[0] == 200   # 서버는 계속 정상
