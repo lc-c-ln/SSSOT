@@ -252,3 +252,26 @@ def test_client_abort_is_silent(server):
         c.sendall(b"GET /api/status HTTP/1.1\r\nHost: x\r\n\r\n")
         c.close()
     assert call(base + "/api/sr")[0] == 200   # 서버는 계속 정상
+
+
+def test_web_projects_and_impact(server, tmp_path):
+    base, app = server
+    spring = str(Path(__file__).parent / "fixtures" / "spring")
+    code, raw = call(base + "/api/projects", {"name": "acme/user", "local_path": spring, "token_env": "NOPE_TOKEN"})
+    assert code == 200
+    chk = json.loads(raw)["check"]
+    assert chk["path_exists"] and chk["java_files"] > 0 and not chk["token_set"]
+    assert call(base + "/api/projects", {"name": "x", "local_path": spring, "token_env": "glpat-abc.def"})[0] == 400
+    assert json.loads(call(base + "/api/projects")[1])["items"][0]["name"] == "acme/user"
+    assert json.loads(call(base + "/api/projects/check?name=acme%2Fuser")[1])["path_exists"]
+    # 분류(code) -> 프로젝트 지정되어 있으면 영향 분석까지 자동 진행
+    app.llm = FakeLLM('{"type":"code","confidence":0.95,"reason":"x","keywords":["User"]}')
+    sid = json.loads(call(base + "/api/sr", {"title": "사용자 목록", "body": "list users", "requester": "이", "project": "acme/user"})[1])["id"]
+    d = json.loads(call(f"{base}/api/sr/{sid}")[1])
+    assert d["sr"]["status"] == "impact_ready" and d["impact"]["candidates"]
+    f = d["impact"]["candidates"][0]["file"]
+    d = json.loads(call(f"{base}/api/sr/{sid}/impact", {"actor": "김담당", "files": [f]})[1])
+    assert d["sr"]["status"] == "impact_confirmed"
+    assert call(f"{base}/api/sr/{sid}/impact", {"actor": "김담당", "files": ["../x"]})[0] == 400
+    assert call(f"{base}/api/sr/{sid}/project", {"actor": "", "project": "acme/user"})[0] == 400
+    assert call(base + "/api/projects/delete", {"name": "acme/user", "actor": "a"})[0] == 200

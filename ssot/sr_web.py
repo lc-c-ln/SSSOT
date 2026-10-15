@@ -11,9 +11,13 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+import os
+import subprocess
 
 from .classify import process_sr, set_manual
+from .impact import analyze_sr, confirm_selection
 from .llm import LLM
 from .store import Store
 
@@ -29,10 +33,25 @@ class App:
     def run_classify(self, sr_id: int) -> None:
         with self._classify_lock:
             try:
-                process_sr(self.store, self.llm, sr_id)
+                if process_sr(self.store, self.llm, sr_id) == "classified":
+                    self.after_classified(sr_id)
             except Exception as e:  # noqa: BLE001 - 백그라운드 스레드 보호
                 self.store.audit(sr_id, "system", "classify.crashed", {"error": f"{type(e).__name__}: {e}"})
                 self.store.update_sr(sr_id, status="pending_llm", reason=f"처리 오류: {e}"[:300])
+
+    def after_classified(self, sr_id: int) -> None:
+        """소스 수정 건이고 등록된 프로젝트가 있으면 이어서 영향 분석을 수행한다."""
+        sr = self.store.get_sr(sr_id)
+        if sr and sr["sr_type"] == "code" and sr["project"] and self.store.get_project(sr["project"]):
+            analyze_sr(self.store, self.llm, sr_id)
+
+    def run_analyze(self, sr_id: int) -> None:
+        with self._classify_lock:
+            try:
+                analyze_sr(self.store, self.llm, sr_id)
+            except Exception as e:  # noqa: BLE001
+                self.store.audit(sr_id, "system", "impact.crashed", {"error": f"{type(e).__name__}: {e}"})
+                self.store.update_sr(sr_id, status="impact_error", reason=f"처리 오류: {e}"[:300])
 
     def start_classify(self, sr_id: int) -> None:
         if self.sync_mode:
@@ -51,7 +70,77 @@ class App:
         sr = self.store.get_sr(sr_id)
         if not sr:
             raise LookupError("SR 을 찾을 수 없습니다.")
-        return {"sr": sr, "audit": self.store.audit_rows(sr_id)}
+        return {"sr": sr, "audit": self.store.audit_rows(sr_id), "impact": self.store.get_impact(sr_id)}
+
+    # ---- 프로젝트 / 영향 분석 ----
+    def projects(self) -> dict:
+        return {"items": self.store.list_projects()}
+
+    def save_project(self, p: dict) -> dict:
+        docs = p.get("doc_paths", [])
+        if isinstance(docs, str):
+            docs = [x for x in docs.splitlines()]
+        proj = self.store.upsert_project(str(p.get("name", "")), str(p.get("local_path", "")), str(p.get("gitlab_url", "")),
+                                         str(p.get("default_branch", "main")), str(p.get("schema_doc", "")),
+                                         str(p.get("token_env", "")), docs)
+        self.store.audit(None, str(p.get("actor", "")).strip() or "unknown", "project.saved",
+                         {k: v for k, v in proj.items() if k != "created_at"})
+        return {"project": proj, "check": self.check_project(proj["name"])}
+
+    def delete_project(self, p: dict) -> dict:
+        self.store.delete_project(str(p.get("name", "")))
+        self.store.audit(None, str(p.get("actor", "")).strip() or "unknown", "project.deleted", {"name": p.get("name")})
+        return {"ok": True}
+
+    def check_project(self, name: str) -> dict:
+        proj = self.store.get_project(name)
+        if not proj:
+            raise LookupError("프로젝트를 찾을 수 없습니다.")
+        root = Path(proj["local_path"])
+        res = {"path_exists": root.is_dir(), "java_files": 0, "git_repo": False, "branch_exists": False,
+               "token_set": bool(proj["token_env"] and os.environ.get(proj["token_env"])),
+               "schema_doc_exists": bool(proj["schema_doc"]) and Path(proj["schema_doc"]).is_file()}
+        if res["path_exists"]:
+            res["java_files"] = sum(1 for _ in root.rglob("*.java"))
+            def git(*a):
+                return subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, timeout=20)
+            try:
+                res["git_repo"] = git("rev-parse", "--is-inside-work-tree").returncode == 0
+                if res["git_repo"]:
+                    res["branch_exists"] = git("rev-parse", "--verify", proj["default_branch"]).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return res
+
+    def analyze(self, sr_id: int, p: dict) -> dict:
+        sr = self.store.get_sr(sr_id)
+        if not sr:
+            raise LookupError("SR 을 찾을 수 없습니다.")
+        if sr["status"] in ("classifying", "analyzing", "received"):
+            raise ValueError("처리 중입니다. 잠시 후 다시 시도하세요.")
+        self.store.audit(sr_id, str(p.get("actor", "")).strip() or "unknown", "impact.requested", {})
+        if self.sync_mode:
+            self.run_analyze(sr_id)
+        else:
+            threading.Thread(target=self.run_analyze, args=(sr_id,), daemon=True).start()
+        return {"ok": True}
+
+    def set_project(self, sr_id: int, p: dict) -> dict:
+        actor, name = str(p.get("actor", "")).strip(), str(p.get("project", "")).strip()
+        if not actor:
+            raise ValueError("담당자 이름이 필요합니다.")
+        sr = self.store.get_sr(sr_id)
+        if not sr:
+            raise LookupError("SR 을 찾을 수 없습니다.")
+        if name and not self.store.get_project(name):
+            raise ValueError(f"등록되지 않은 프로젝트입니다: {name}")
+        self.store.update_sr(sr_id, project=name)
+        self.store.audit(sr_id, actor, "sr.project_changed", {"from": sr["project"], "to": name})
+        return self.detail(sr_id)
+
+    def confirm_impact(self, sr_id: int, p: dict) -> dict:
+        confirm_selection(self.store, sr_id, str(p.get("actor", "")), [str(f) for f in p.get("files", [])])
+        return self.detail(sr_id)
 
     def classify_manual(self, sr_id: int, p: dict) -> dict:
         set_manual(self.store, sr_id, str(p.get("actor", "")), str(p.get("type", "")), str(p.get("note", "")))
@@ -128,6 +217,12 @@ def make_handler(app: App):
                 return self._guard(app.status)
             if path == "/api/sr":
                 return self._guard(lambda: {"items": app.store.list_sr()})
+            if path == "/api/projects":
+                return self._guard(app.projects)
+            m = re.fullmatch(r"/api/projects/check", path)
+            if m:
+                name = parse_qs(urlparse(self.path).query).get("name", [""])[0]
+                return self._guard(lambda: app.check_project(name))
             m = re.fullmatch(r"/api/sr/(\d+)", path)
             if m:
                 return self._guard(lambda: app.detail(int(m.group(1))))
@@ -154,9 +249,14 @@ def make_handler(app: App):
 
             if path == "/api/sr":
                 return self._guard(lambda: app.create(body()))
-            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry)", path)
+            if path == "/api/projects":
+                return self._guard(lambda: app.save_project(body()))
+            if path == "/api/projects/delete":
+                return self._guard(lambda: app.delete_project(body()))
+            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project)", path)
             if m:
-                fn = app.classify_manual if m.group(2) == "classify" else app.retry
+                fn = {"classify": app.classify_manual, "retry": app.retry, "analyze": app.analyze,
+                      "impact": app.confirm_impact, "project": app.set_project}[m.group(2)]
                 return self._guard(lambda: fn(int(m.group(1)), body()))
             self._json(404, {"error": "not found"})
 

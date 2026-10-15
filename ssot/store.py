@@ -25,13 +25,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
   ts TEXT NOT NULL, sr_id INTEGER, actor TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL,
   prev_hash TEXT NOT NULL, hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE, gitlab_url TEXT NOT NULL DEFAULT '', default_branch TEXT NOT NULL DEFAULT 'main',
+  local_path TEXT NOT NULL, schema_doc TEXT NOT NULL DEFAULT '', token_env TEXT NOT NULL DEFAULT '',
+  doc_paths TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sr_impact (
+  sr_id INTEGER PRIMARY KEY, keywords TEXT NOT NULL, candidates TEXT NOT NULL, selected TEXT NOT NULL DEFAULT '[]',
+  vector_used INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embed_cache (sha TEXT NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (sha, model));
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 """
 
-STATUSES = {"received", "classifying", "classified", "needs_review", "pending_llm"}
+STATUSES = {"received", "classifying", "classified", "needs_review", "pending_llm",
+            "analyzing", "impact_ready", "impact_error", "impact_confirmed"}
 TYPES = {"code", "data", "unknown"}
 
 _SECRET_PATTERNS = [
@@ -139,7 +151,7 @@ class Store:
         return [dict(r) for r in rows]
 
     def update_sr(self, sr_id: int, **fields) -> None:
-        allowed = {"status", "sr_type", "confidence", "reason"}
+        allowed = {"status", "sr_type", "confidence", "reason", "project"}
         if set(fields) - allowed:
             raise ValueError(f"수정할 수 없는 필드: {set(fields) - allowed}")
         if "status" in fields and fields["status"] not in STATUSES:
@@ -149,4 +161,94 @@ class Store:
         sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
         with self._lock:
             self._db.execute(f"UPDATE sr SET {sets} WHERE id=?", (*fields.values(), _now(), sr_id))
+            self._db.commit()
+
+    # ---- 프로젝트 ----
+    def upsert_project(self, name: str, local_path: str, gitlab_url: str = "", default_branch: str = "main",
+                       schema_doc: str = "", token_env: str = "", doc_paths: list[str] | None = None) -> dict:
+        name, local_path = name.strip(), local_path.strip().strip('"')
+        if not name or not local_path:
+            raise ValueError("프로젝트 이름과 로컬 소스 경로는 필수입니다.")
+        if len(name) > 100 or not re.fullmatch(r"[\w\-./ 가-힣]+", name):
+            raise ValueError("프로젝트 이름에는 글자, 숫자, - _ . / 공백만 쓸 수 있습니다.")
+        token_env = token_env.strip()
+        if token_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env):
+            raise ValueError("토큰 환경변수 이름 형식이 올바르지 않습니다. (토큰 값이 아니라 변수 이름을 넣으세요)")
+        gitlab_url = gitlab_url.strip().rstrip("/")
+        if gitlab_url and not re.match(r"https?://", gitlab_url):
+            raise ValueError("GitLab 주소는 http(s):// 로 시작해야 합니다.")
+        docs = json.dumps([d.strip().strip('"') for d in (doc_paths or []) if d.strip()], ensure_ascii=False)
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO project(name, gitlab_url, default_branch, local_path, schema_doc, token_env, doc_paths, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET gitlab_url=excluded.gitlab_url,"
+                " default_branch=excluded.default_branch, local_path=excluded.local_path, schema_doc=excluded.schema_doc,"
+                " token_env=excluded.token_env, doc_paths=excluded.doc_paths",
+                (name, gitlab_url, default_branch.strip() or "main", local_path, schema_doc.strip().strip('"'),
+                 token_env, docs, _now()))
+            self._db.commit()
+        return self.get_project(name)
+
+    def get_project(self, name: str) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM project WHERE name=?", (name,)).fetchone()
+        return self._proj(r) if r else None
+
+    def list_projects(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM project ORDER BY name").fetchall()
+        return [self._proj(r) for r in rows]
+
+    def delete_project(self, name: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM project WHERE name=?", (name,))
+            self._db.commit()
+
+    @staticmethod
+    def _proj(r) -> dict:
+        d = dict(r)
+        d["doc_paths"] = json.loads(d["doc_paths"])
+        return d
+
+    # ---- 영향 분석 ----
+    def save_impact(self, sr_id: int, keywords: list[str], candidates: list[dict], vector_used: bool) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO sr_impact(sr_id, keywords, candidates, selected, vector_used, updated_at) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(sr_id) DO UPDATE SET keywords=excluded.keywords, candidates=excluded.candidates,"
+                " selected=excluded.selected, vector_used=excluded.vector_used, updated_at=excluded.updated_at",
+                (sr_id, json.dumps(keywords, ensure_ascii=False), json.dumps(candidates, ensure_ascii=False),
+                 json.dumps([c["file"] for c in candidates if c.get("preselected")], ensure_ascii=False),
+                 int(vector_used), _now()))
+            self._db.commit()
+
+    def get_impact(self, sr_id: int) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM sr_impact WHERE sr_id=?", (sr_id,)).fetchone()
+        if not r:
+            return None
+        return {"keywords": json.loads(r["keywords"]), "candidates": json.loads(r["candidates"]),
+                "selected": json.loads(r["selected"]), "vector_used": bool(r["vector_used"]), "updated_at": r["updated_at"]}
+
+    def set_selected(self, sr_id: int, files: list[str]) -> None:
+        with self._lock:
+            self._db.execute("UPDATE sr_impact SET selected=?, updated_at=? WHERE sr_id=?",
+                             (json.dumps(files, ensure_ascii=False), _now(), sr_id))
+            self._db.commit()
+
+    # ---- 임베딩 캐시 ----
+    def cache_get(self, shas: list[str], model: str) -> dict[str, bytes]:
+        out: dict[str, bytes] = {}
+        with self._lock:
+            for i in range(0, len(shas), 500):
+                part = shas[i:i + 500]
+                q = ",".join("?" * len(part))
+                for r in self._db.execute(f"SELECT sha, vec FROM embed_cache WHERE model=? AND sha IN ({q})", (model, *part)):
+                    out[r["sha"]] = r["vec"]
+        return out
+
+    def cache_put(self, items: dict[str, bytes], model: str) -> None:
+        with self._lock:
+            self._db.executemany("INSERT OR REPLACE INTO embed_cache(sha, model, vec) VALUES (?,?,?)",
+                                 [(k, model, v) for k, v in items.items()])
             self._db.commit()
