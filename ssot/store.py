@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS doc_patch (
   summary TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', decided_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project, commit_sha, doc_path)
 );
+CREATE TABLE IF NOT EXISTS sr_data (
+  sr_id INTEGER PRIMARY KEY, schema_source TEXT NOT NULL, tables TEXT NOT NULL, related TEXT NOT NULL,
+  statements TEXT NOT NULL, notes TEXT NOT NULL, diffs TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS embed_cache (sha TEXT NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (sha, model));
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
@@ -58,6 +62,7 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 
 STATUSES = {"received", "classifying", "classified", "needs_review", "pending_llm",
             "analyzing", "impact_ready", "impact_error", "impact_confirmed",
+            "data_analyzing", "data_ready", "data_error", "data_done",
             "patch_generating", "patch_ready", "patch_failed", "rejected", "committed", "mr_created"}
 TYPES = {"code", "data", "unknown"}
 
@@ -94,6 +99,9 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(project)")}
+            if "db_env_prefix" not in cols:   # 이전 버전 DB 호환
+                self._db.execute("ALTER TABLE project ADD COLUMN db_env_prefix TEXT NOT NULL DEFAULT ''")
             self._db.commit()
 
     # ---- 감사 로그 ----
@@ -180,7 +188,8 @@ class Store:
 
     # ---- 프로젝트 ----
     def upsert_project(self, name: str, local_path: str, gitlab_url: str = "", default_branch: str = "main",
-                       schema_doc: str = "", token_env: str = "", doc_paths: list[str] | None = None) -> dict:
+                       schema_doc: str = "", token_env: str = "", doc_paths: list[str] | None = None,
+                       db_env_prefix: str = "") -> dict:
         name, local_path = name.strip(), local_path.strip().strip('"')
         if not name or not local_path:
             raise ValueError("프로젝트 이름과 로컬 소스 경로는 필수입니다.")
@@ -189,18 +198,21 @@ class Store:
         token_env = token_env.strip()
         if token_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env):
             raise ValueError("토큰 환경변수 이름 형식이 올바르지 않습니다. (토큰 값이 아니라 변수 이름을 넣으세요)")
+        db_env_prefix = db_env_prefix.strip()
+        if db_env_prefix and not re.fullmatch(r"[A-Za-z0-9_]{1,40}", db_env_prefix):
+            raise ValueError("DB 환경변수 접두어는 영문/숫자/_ 만 쓸 수 있습니다. (SSOT_DB_<접두어>_USER 형태로 읽습니다)")
         gitlab_url = gitlab_url.strip().rstrip("/")
         if gitlab_url and not re.match(r"https?://", gitlab_url):
             raise ValueError("GitLab 주소는 http(s):// 로 시작해야 합니다.")
         docs = json.dumps([d.strip().strip('"') for d in (doc_paths or []) if d.strip()], ensure_ascii=False)
         with self._lock:
             self._db.execute(
-                "INSERT INTO project(name, gitlab_url, default_branch, local_path, schema_doc, token_env, doc_paths, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET gitlab_url=excluded.gitlab_url,"
+                "INSERT INTO project(name, gitlab_url, default_branch, local_path, schema_doc, token_env, doc_paths, created_at, db_env_prefix)"
+                " VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET gitlab_url=excluded.gitlab_url,"
                 " default_branch=excluded.default_branch, local_path=excluded.local_path, schema_doc=excluded.schema_doc,"
-                " token_env=excluded.token_env, doc_paths=excluded.doc_paths",
+                " token_env=excluded.token_env, doc_paths=excluded.doc_paths, db_env_prefix=excluded.db_env_prefix",
                 (name, gitlab_url, default_branch.strip() or "main", local_path, schema_doc.strip().strip('"'),
-                 token_env, docs, _now()))
+                 token_env, docs, _now(), db_env_prefix))
             self._db.commit()
         return self.get_project(name)
 
@@ -352,3 +364,26 @@ class Store:
         with self._lock:
             self._db.execute(f"UPDATE doc_patch SET {sets} WHERE id=?", (*fields.values(), _now(), pid))
             self._db.commit()
+
+    # ---- 데이터 수정 분석 ----
+    def save_data(self, sr_id: int, schema_source: str, tables: list, related: list, statements: list, notes: list,
+                  diffs: list) -> None:
+        j = lambda x: json.dumps(x, ensure_ascii=False)  # noqa: E731
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO sr_data(sr_id, schema_source, tables, related, statements, notes, diffs, updated_at) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(sr_id) DO UPDATE SET schema_source=excluded.schema_source, tables=excluded.tables,"
+                " related=excluded.related, statements=excluded.statements, notes=excluded.notes, diffs=excluded.diffs,"
+                " updated_at=excluded.updated_at",
+                (sr_id, schema_source, j(tables), j(related), j(statements), j(notes), j(diffs), _now()))
+            self._db.commit()
+
+    def get_data(self, sr_id: int) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM sr_data WHERE sr_id=?", (sr_id,)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        for k in ("tables", "related", "statements", "notes", "diffs"):
+            d[k] = json.loads(d[k])
+        return d

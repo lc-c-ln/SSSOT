@@ -17,8 +17,10 @@ import os
 import subprocess
 
 from .classify import process_sr, set_manual
+from .dataflow import analyze_data_sr, report_executed
 from .docsync import apply_doc_patch, dismiss_doc_patch, handle_push, scan_commit, verify_secret
 from . import gitops
+from .oracle_meta import configured as oracle_configured
 from .gitlab import PublishError, publish
 from .impact import analyze_sr, confirm_selection
 from .patch import decide, generate_patch
@@ -47,8 +49,12 @@ class App:
     def after_classified(self, sr_id: int) -> None:
         """소스 수정 건이고 등록된 프로젝트가 있으면 이어서 영향 분석을 수행한다."""
         sr = self.store.get_sr(sr_id)
-        if sr and sr["sr_type"] == "code" and sr["project"] and self.store.get_project(sr["project"]):
+        if not (sr and sr["project"] and self.store.get_project(sr["project"])):
+            return
+        if sr["sr_type"] == "code":
             analyze_sr(self.store, self.llm, sr_id)
+        elif sr["sr_type"] == "data":
+            analyze_data_sr(self.store, self.llm, sr_id)
 
     def run_analyze(self, sr_id: int) -> None:
         with self._classify_lock:
@@ -76,7 +82,7 @@ class App:
         if not sr:
             raise LookupError("SR 을 찾을 수 없습니다.")
         return {"sr": sr, "audit": self.store.audit_rows(sr_id), "impact": self.store.get_impact(sr_id),
-                "patches": self.store.list_patches(sr_id), "self_approve": self.allow_self_approve}
+                "patches": self.store.list_patches(sr_id), "data": self.store.get_data(sr_id), "self_approve": self.allow_self_approve}
 
     # ---- 프로젝트 / 영향 분석 ----
     def projects(self) -> dict:
@@ -88,7 +94,7 @@ class App:
             docs = [x for x in docs.splitlines()]
         proj = self.store.upsert_project(str(p.get("name", "")), str(p.get("local_path", "")), str(p.get("gitlab_url", "")),
                                          str(p.get("default_branch", "main")), str(p.get("schema_doc", "")),
-                                         str(p.get("token_env", "")), docs)
+                                         str(p.get("token_env", "")), docs, str(p.get("db_env_prefix", "")))
         self.store.audit(None, str(p.get("actor", "")).strip() or "unknown", "project.saved",
                          {k: v for k, v in proj.items() if k != "created_at"})
         return {"project": proj, "check": self.check_project(proj["name"])}
@@ -105,7 +111,8 @@ class App:
         root = Path(proj["local_path"])
         res = {"path_exists": root.is_dir(), "java_files": 0, "git_repo": False, "branch_exists": False,
                "token_set": bool(proj["token_env"] and os.environ.get(proj["token_env"])),
-               "schema_doc_exists": bool(proj["schema_doc"]) and Path(proj["schema_doc"]).is_file()}
+               "schema_doc_exists": bool(proj["schema_doc"]) and Path(proj["schema_doc"]).is_file(),
+               "db_configured": bool(proj["db_env_prefix"]) and oracle_configured(proj["db_env_prefix"])}
         if res["path_exists"]:
             res["java_files"] = sum(1 for _ in root.rglob("*.java"))
             def git(*a):
@@ -147,6 +154,32 @@ class App:
     def confirm_impact(self, sr_id: int, p: dict) -> dict:
         confirm_selection(self.store, sr_id, str(p.get("actor", "")), [str(f) for f in p.get("files", [])])
         self.start_patch(sr_id)
+        return self.detail(sr_id)
+
+    # ---- 데이터 수정 (M5) ----
+    def run_data(self, sr_id: int) -> None:
+        with self._classify_lock:
+            try:
+                analyze_data_sr(self.store, self.llm, sr_id)
+            except Exception as e:  # noqa: BLE001
+                self.store.audit(sr_id, "system", "data.crashed", {"error": f"{type(e).__name__}: {e}"})
+                self.store.update_sr(sr_id, status="data_error", reason=f"처리 오류: {e}"[:300])
+
+    def data_analyze(self, sr_id: int, p: dict) -> dict:
+        sr = self.store.get_sr(sr_id)
+        if not sr:
+            raise LookupError("SR 을 찾을 수 없습니다.")
+        if sr["sr_type"] != "data" or sr["status"] in ("classifying", "received", "data_analyzing"):
+            raise ValueError("데이터 수정 건으로 분류가 끝난 SR 만 분석할 수 있습니다.")
+        self.store.audit(sr_id, str(p.get("actor", "")).strip() or "unknown", "data.requested", {})
+        if self.sync_mode:
+            self.run_data(sr_id)
+        else:
+            threading.Thread(target=self.run_data, args=(sr_id,), daemon=True).start()
+        return {"ok": True}
+
+    def data_report(self, sr_id: int, p: dict) -> dict:
+        report_executed(self.store, sr_id, str(p.get("actor", "")), str(p.get("affected", "")), str(p.get("note", "")))
         return self.detail(sr_id)
 
     # ---- 문서 갱신 (M4) ----
@@ -366,10 +399,11 @@ def make_handler(app: App):
                 return self._guard(lambda: app.save_project(body()))
             if path == "/api/projects/delete":
                 return self._guard(lambda: app.delete_project(body()))
-            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project|patch/generate|patch/decide|patch/publish)", path)
+            m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project|data/analyze|data/report|patch/generate|patch/decide|patch/publish)", path)
             if m:
                 fn = {"classify": app.classify_manual, "retry": app.retry, "analyze": app.analyze,
                       "impact": app.confirm_impact, "project": app.set_project,
+                      "data/analyze": app.data_analyze, "data/report": app.data_report,
                       "patch/generate": app.patch_generate, "patch/decide": app.patch_decide,
                       "patch/publish": app.patch_publish}[m.group(2)]
                 return self._guard(lambda: fn(int(m.group(1)), body()))

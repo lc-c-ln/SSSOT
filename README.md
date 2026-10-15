@@ -37,6 +37,12 @@ python -m ssot sr                # http://127.0.0.1:8766  (DB: ssot_sr.db, 로�
 - 웹훅 없이도 *문서 갱신* 탭의 "지금 스캔"으로 최신 커밋을 처리할 수 있습니다.
 - 커밋 메시지에 `SR-0142` 가 있으면 해당 SR의 처리 이력에 문서 변경이 함께 기록됩니다(승인 커밋의 메시지에 자동 포함됨).
 
+**데이터 수정 건 (M5)**: 분류가 *데이터 수정*이면 프로젝트의 DB 스키마 문서(`.sql` DDL, md/docx/xlsx 표)에서 관련 테이블·컬럼을 찾고, FK 로 연결된 테이블(영향 범위)과 **Oracle 문법의 SQL 안**을 보여줍니다.
+- SQL 은 **절대 실행하지 않습니다.** 변경문(UPDATE/DELETE/INSERT)은 코드가 검증해 WHERE 없는 변경, `1=1`, DDL, 여러 문장, 주석, SYS/DBMS_ 사용을 차단하고 스키마에 없는 이름은 경고합니다. 영향 건수 확인용 `SELECT COUNT(*)`·미리보기·백업 권고는 변경문의 WHERE 에서 코드가 직접 만듭니다.
+- 스키마 문서 표는 헤더에 `테이블명`, `컬럼명` 열이 있으면 인식합니다(시트/제목이 테이블명인 형식도 지원). 인식이 안 되면 문서 샘플을 알려 주세요.
+- 실제 DB 메타데이터 조회(선택): `pip install oracledb` 후 프로젝트 설정의 *환경변수 접두어*(예: `MEMBER`)를 지정하고 `SSOT_DB_MEMBER_USER`, `SSOT_DB_MEMBER_PASSWORD`, `SSOT_DB_MEMBER_DSN`(host:1521/서비스명), 선택 `SSOT_DB_MEMBER_OWNER` 를 설정합니다. **읽기 전용 계정**을 쓰세요. 딕셔너리 뷰만 조회하고 업무 데이터 행은 읽지 않습니다. 문서와 DB 가 다르면 불일치 목록을 보여주며 기본은 DB 우선입니다(`SSOT_SCHEMA_PRIORITY=doc` 로 반전).
+- 담당자가 SQL 을 직접 실행한 뒤 *실행 완료로 기록*(처리 건수, 메모)하면 감사 로그에 "담당자 보고"로 남습니다.
+
 환경변수: `OLLAMA_HOST`, `SSOT_MODEL`(기본 qwen2.5-coder:7b), `SSOT_NUM_CTX`, `SSOT_LOCAL_ONLY=1`(외부 LLM 차단). 로컬/사설망이 아닌 Ollama 주소는 거부됩니다.
 
 ## 동작 원칙

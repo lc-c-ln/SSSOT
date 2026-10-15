@@ -41,6 +41,7 @@ details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]
   <label for="pb">기본 브랜치</label><input id="pb" value="main">
   <label for="pt">GitLab 토큰이 들어 있는 환경변수 이름 (값이 아님)</label><input id="pt" placeholder="GITLAB_TOKEN_MEMBER">
   <label for="ps">DB 스키마 문서 경로 (선택)</label><input id="ps" placeholder="D:\docs\member-schema.xlsx">
+  <label for="pdb">실제 Oracle 메타데이터 조회용 환경변수 접두어 (선택, 기본 꺼짐)</label><input id="pdb" placeholder="MEMBER → SSOT_DB_MEMBER_USER / _PASSWORD / _DSN 을 읽음">
   <label for="pd">갱신할 문서 경로 (줄바꿈으로 여러 개, 선택)</label><textarea id="pd" style="min-height:60px"></textarea>
   <label for="pa">작업자</label><input id="pa" maxlength="100">
   <p><button class="p" type="submit">저장 후 연결 확인</button> <span id="pmsg" class="m"></span></p></form>
@@ -50,9 +51,9 @@ details{margin:4px 0}.tabs{display:flex;gap:6px}.tabs button[aria-selected=true]
 <script>
 const $=id=>document.getElementById(id);
 const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const ST={patch_generating:['수정안 생성 중','wait'],patch_ready:['수정안 승인 대기','wait'],patch_failed:['수정안 생성 실패','wait'],rejected:['반려','wait'],committed:['브랜치 커밋됨','ok'],mr_created:['MR 생성됨','ok'],analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
+const ST={data_analyzing:['테이블 분석 중','wait'],data_ready:['SQL 안 확인 대기','wait'],data_error:['데이터 분석 오류','wait'],data_done:['처리 완료(담당자 보고)','ok'],patch_generating:['수정안 생성 중','wait'],patch_ready:['수정안 승인 대기','wait'],patch_failed:['수정안 생성 실패','wait'],rejected:['반려','wait'],committed:['브랜치 커밋됨','ok'],mr_created:['MR 생성됨','ok'],analyzing:['영향 분석 중','wait'],impact_ready:['대상 파일 선택 대기','wait'],impact_error:['영향 분석 오류','wait'],impact_confirmed:['대상 파일 확정','ok'],received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
 const TY={code:'소스 수정',data:'데이터 수정',unknown:'판단 불가','':'-'};
-let cur=null,PROJECTS=[];
+let cur=null,PROJECTS=[],DATA=null;
 const show2=t=>{$('p1').hidden=t!==1;$('p2').hidden=t!==2;$('p3').hidden=t!==3;$('t3').setAttribute('aria-selected',t===3);if(t!==1)$('d').hidden=true;else if(cur)$('d').hidden=false;$('t1').setAttribute('aria-selected',t===1);$('t2').setAttribute('aria-selected',t===2)};
 $('t1').onclick=()=>show2(1);$('t2').onclick=()=>{show2(2);loadProjects()};
 $('t3').onclick=async()=>{show2(3);await loadProjects();$('sp3').innerHTML=PROJECTS.map(p=>`<option>${E(p.name)}</option>`).join('');loadDocs()};
@@ -70,12 +71,12 @@ $('scan3').onclick=async()=>{$('scanmsg').textContent='스캔 중… (AI 사용 
 async function loadProjects(){const {items}=await api('/api/projects');PROJECTS=items;
  const cur=$('project').value;$('project').innerHTML='<option value="">(지정 안 함)</option>'+items.map(p=>`<option>${E(p.name)}</option>`).join('');$('project').value=cur;
  $('plist').innerHTML=items.map(p=>`<div class="cand"><b>${E(p.name)}</b> <span class="m">${E(p.default_branch)}</span><div class="m mono">${E(p.local_path)}</div><div class="m">${E(p.gitlab_url||'GitLab 미지정')} · 토큰: ${E(p.token_env||'미지정')}</div><div class="row"><div><button data-chk="${E(p.name)}">연결 확인</button> <button data-edit="${E(p.name)}">수정</button> <button data-del="${E(p.name)}">삭제</button></div></div><div class="m" id="chk-${E(p.name)}"></div></div>`).join('')||'<p class="m">등록된 프로젝트가 없습니다. 왼쪽에서 등록하세요.</p>'}
-function chkText(c){const y=(b,t)=>`<span class="${b?'ok':'err'}">${b?'✓':'✗'} ${t}</span>`;return [y(c.path_exists,'소스 폴더'),y(c.java_files>0,'Java 파일 '+c.java_files+'개'),y(c.git_repo,'Git 저장소'),y(c.branch_exists,'기본 브랜치'),y(c.token_set,'토큰 환경변수'),y(c.schema_doc_exists,'스키마 문서')].join(' · ')}
+function chkText(c){const y=(b,t)=>`<span class="${b?'ok':'err'}">${b?'✓':'✗'} ${t}</span>`;return [y(c.path_exists,'소스 폴더'),y(c.java_files>0,'Java 파일 '+c.java_files+'개'),y(c.git_repo,'Git 저장소'),y(c.branch_exists,'기본 브랜치'),y(c.token_set,'토큰 환경변수'),y(c.schema_doc_exists,'스키마 문서'),y(c.db_configured,'DB 접속 설정(선택)')].join(' · ')}
 $('plist').onclick=async e=>{const b=e.target.closest('button');if(!b)return;
  if(b.dataset.chk){$('chk-'+b.dataset.chk).innerHTML=chkText(await api('/api/projects/check?name='+encodeURIComponent(b.dataset.chk)))}
- if(b.dataset.edit){const p=PROJECTS.find(x=>x.name===b.dataset.edit);$('pn').value=p.name;$('pl').value=p.local_path;$('pg').value=p.gitlab_url;$('pb').value=p.default_branch;$('pt').value=p.token_env;$('ps').value=p.schema_doc;$('pd').value=p.doc_paths.join('\n')}
+ if(b.dataset.edit){const p=PROJECTS.find(x=>x.name===b.dataset.edit);$('pn').value=p.name;$('pl').value=p.local_path;$('pg').value=p.gitlab_url;$('pb').value=p.default_branch;$('pt').value=p.token_env;$('ps').value=p.schema_doc;$('pdb').value=p.db_env_prefix||'';$('pd').value=p.doc_paths.join('\n')}
  if(b.dataset.del&&confirm('삭제할까요? (SR 기록은 유지됩니다)'))await post('/api/projects/delete',{name:b.dataset.del,actor:$('pa').value}).then(loadProjects)};
-$('pf').onsubmit=async e=>{e.preventDefault();try{const r=await post('/api/projects',{actor:$('pa').value,name:$('pn').value,local_path:$('pl').value,gitlab_url:$('pg').value,default_branch:$('pb').value,token_env:$('pt').value,schema_doc:$('ps').value,doc_paths:$('pd').value});
+$('pf').onsubmit=async e=>{e.preventDefault();try{const r=await post('/api/projects',{actor:$('pa').value,name:$('pn').value,local_path:$('pl').value,gitlab_url:$('pg').value,default_branch:$('pb').value,token_env:$('pt').value,schema_doc:$('ps').value,db_env_prefix:$('pdb').value,doc_paths:$('pd').value});
  $('pmsg').innerHTML=chkText(r.check);await loadProjects()}catch(x){$('pmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
 async function api(p,o){const r=await fetch(p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 const post=(p,b)=>api(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
@@ -93,8 +94,23 @@ function patchHtml(sr,patches,selfOk){
  if(p.status==='committed'||p.status==='published'){h+=`<p>브랜치 <b class="mono">${E(p.branch)}</b> · 커밋 <span class="mono">${E(p.commit_sha.slice(0,8))}</span> · 승인 ${E(p.decided_by)}</p>`;
   h+=p.mr_url?`<p>Merge Request: <a href="${E(p.mr_url)}" target="_blank" rel="noopener">${E(p.mr_url)}</a></p>`:`<p class="m">${E(sr.reason)}</p><button id="ppub">GitLab에 push 후 MR 생성</button>`}
  return h}
+function dataHtml(sr,d){
+ const opts=PROJECTS.map(p=>`<option ${p.name===sr.project?'selected':''}>${E(p.name)}</option>`).join('');
+ let h=`<div class="row"><div><label for="sp">대상 프로젝트 (DB 스키마가 등록된)</label><select id="sp"><option value="">(선택)</option>${opts}</select></div><div><button id="sproj">프로젝트 지정</button> <button id="dana">테이블 분석 / SQL 안 생성</button></div></div>`;
+ if(sr.status==='data_analyzing')return h+'<p class="m">테이블 분석 중…</p>';
+ if(!d)return h;
+ h+=`<h2 style="margin-top:12px">관련 테이블 <span class="m">스키마: ${E(d.schema_source)}</span></h2>`;
+ h+=d.tables.map(t=>`<div class="cand"><b class="mono">${E(t.name)}</b> ${E(t.comment)} <span class="pill ${t.by==='ai'?'':'wait'}">${t.by==='ai'?'AI 선정':'검색 점수(AI 실패)'}</span><div class="m">${E(t.reason)}</div><div class="sc"><table><thead><tr><th>컬럼</th><th>타입</th><th>설명</th></tr></thead><tbody>${t.columns_info.map(c=>`<tr style="${t.columns.includes(c.name)?'font-weight:600':''}"><td class="mono">${E(c.name)}${c.pk?' 🔑':''}</td><td class="mono">${E(c.type)}</td><td>${E(c.comment)}</td></tr>`).join('')}</tbody></table></div></div>`).join('');
+ if(d.related.length)h+=`<h2 style="margin-top:12px">영향 범위 (연관 테이블)</h2>`+d.related.map(r=>`<div class="cand"><b class="mono">${E(r.table)}</b><div class="m">${r.via.map(E).join('<br>')}</div></div>`).join('');
+ if(d.diffs.length)h+=`<details><summary class="err">스키마 문서와 DB 불일치 ${d.diffs.length}건</summary><pre>${E(d.diffs.join('\n'))}</pre></details>`;
+ h+=`<div class="cand" style="border-color:var(--wait);background:#fdf0dc;color:#7a3b00"><b>자동 실행되지 않습니다.</b> 아래 SQL 은 담당자가 확인한 뒤 직접 실행하세요. COMMIT 은 영향 건수를 확인한 뒤에 하세요.</div>`;
+ h+=d.statements.map((x,i)=>x.blocked?`<details open><summary class="err">차단됨: ${E(x.title)}</summary><ul>${x.warnings.map(w=>'<li>'+E(w)+'</li>').join('')}</ul><pre>${E(x.sql)}</pre></details>`:`<div style="margin-top:8px"><div class="row" style="align-items:center"><b>${E(x.title)}</b><span style="flex:0 0 auto"><button data-copy="${i}">복사</button></span></div><pre id="sql${i}" style="max-height:none">${E(x.sql)}</pre>${x.warnings.map(w=>`<div class="err">⚠ ${E(w)}</div>`).join('')}</div>`).join('');
+ h+=`<ul class="m">${d.notes.map(n=>'<li>'+E(n)+'</li>').join('')}</ul>`;
+ if(sr.status==='data_ready')h+=`<div class="row"><div><label for="daff">처리 건수 (실행 후)</label><input id="daff" inputmode="numeric"></div><div><label for="dnote">메모</label><input id="dnote" maxlength="300"></div><div><button class="p" id="drep">실행 완료로 기록</button></div></div><p class="m">시스템은 실행 결과를 알 수 없어 "담당자 보고"로 기록됩니다.</p>`;
+ return h}
 function impactHtml(sr,imp){
- if(sr.sr_type!=='code'||['classifying','received','pending_llm'].includes(sr.status))return sr.sr_type==='data'?'<p class="m">데이터 수정 건: 테이블 분석은 다음 단계에서 제공됩니다.</p>':'';
+ if(sr.sr_type==='data'&&!['classifying','received','pending_llm'].includes(sr.status))return dataHtml(sr,DATA);
+ if(sr.sr_type!=='code'||['classifying','received','pending_llm'].includes(sr.status))return '';
  const opts=PROJECTS.map(p=>`<option ${p.name===sr.project?'selected':''}>${E(p.name)}</option>`).join('');
  let h=`<div class="row"><div><label for="sp">대상 프로젝트</label><select id="sp"><option value="">(선택)</option>${opts}</select></div><div><button id="sproj">프로젝트 지정</button> <button id="sana">영향 분석 실행</button></div></div>`;
  if(sr.status==='analyzing')return h+'<p class="m">영향 분석 중…</p>';
@@ -108,7 +124,7 @@ async function status(){try{const s=await api('/api/status');const o=s.ollama;
  $('st').innerHTML=(o.ok?`Ollama 연결됨 · 모델 ${E(o.model)} ${o.model_ready?'':'<span class="err">(미설치: ollama pull)</span>'}`:`<span class="err">Ollama 연결 안 됨</span> (${E(o.error||'')})`)+` · 감사 로그 ${s.audit.ok?'무결성 정상 ('+s.audit.count+'건)':'<span class="err">변조 의심: #'+s.audit.broken_at+'</span>'}`}catch(e){$('st').textContent=e.message}}
 async function list(){const {items}=await api('/api/sr');
  $('list').innerHTML=items.map(r=>`<tr class="r ${cur===r.id?'sel':''}" data-id="${r.id}"><td>SR-${String(r.id).padStart(4,'0')}</td><td>${E(r.title)}<div class="m">${E(r.requester)}</div></td><td>${pill(r.status)}</td><td>${TY[r.sr_type]||'-'}</td></tr>`).join('')||'<tr><td colspan="4" class="m">아직 요청이 없습니다.</td></tr>'}
-async function show(id){cur=id;const {sr,audit,impact,patches,self_approve}=await api('/api/sr/'+id);const d=$('d');d.hidden=false;
+async function show(id){cur=id;const {sr,audit,impact,patches,self_approve,data}=await api('/api/sr/'+id);DATA=data;const d=$('d');d.hidden=false;
  const need=sr.status==='needs_review',pend=sr.status==='pending_llm';
  d.innerHTML=`<h2>SR-${String(sr.id).padStart(4,'0')} ${E(sr.title)} ${pill(sr.status)}</h2>
  <div class="m">${E(sr.requester)} · ${E(sr.project||'-')} · ${E(sr.created_at)}</div><pre>${E(sr.body)}</pre>
@@ -127,6 +143,9 @@ async function show(id){cur=id;const {sr,audit,impact,patches,self_approve}=awai
  if($('xadd'))$('xadd').onclick=()=>{const v=$('xf').value.trim();if(!v)return;const l=document.createElement('div');l.className='cand';l.innerHTML=`<label><input type="checkbox" class="cf" value="${E(v)}" checked> <b class="mono">${E(v)}</b> <span class="pill">직접 추가</span></label>`;$('xadd').closest('.row').before(l);$('xf').value=''};
  if($('xok'))$('xok').onclick=f(()=>post(`/api/sr/${id}/impact`,{actor:$('actor')?.value||'',files:[...document.querySelectorAll('.cf:checked')].map(x=>x.value)}));
  const act=()=>$('actor')?.value||'';
+ if($('dana'))$('dana').onclick=f(()=>post(`/api/sr/${id}/data/analyze`,{actor:act()}));
+ if($('drep'))$('drep').onclick=f(()=>post(`/api/sr/${id}/data/report`,{actor:act(),affected:$('daff').value,note:$('dnote').value}));
+ document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=async()=>{const t=$('sql'+b.dataset.copy).textContent;try{await navigator.clipboard.writeText(t);b.textContent='복사됨'}catch(_){const r=document.createRange();r.selectNodeContents($('sql'+b.dataset.copy));getSelection().removeAllRanges();getSelection().addRange(r);b.textContent='선택됨(Ctrl+C)'}});
  const dec=d=>f(()=>post(`/api/sr/${id}/patch/decide`,{actor:act(),patch_id:patches[patches.length-1].id,decision:d,note:$('pnote')?.value||''}));
  if($('pok'))$('pok').onclick=dec('approve');if($('prev'))$('prev').onclick=dec('revise');if($('prej'))$('prej').onclick=dec('reject');
  if($('pgen'))$('pgen').onclick=f(()=>post(`/api/sr/${id}/patch/generate`,{actor:act(),feedback:$('pnote')?.value||''}));
@@ -138,6 +157,6 @@ $('list').onclick=e=>{const t=e.target.closest('tr.r');if(t)show(+t.dataset.id)}
 $('f').onsubmit=async e=>{e.preventDefault();$('fmsg').textContent='';try{
  const r=await post('/api/sr',{requester:$('requester').value,project:$('project').value,title:$('title').value,body:$('body').value});
  $('title').value='';$('body').value='';$('fmsg').textContent='등록되었습니다. AI가 분류하는 중…';await list();show(r.id)}catch(x){$('fmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
-setInterval(()=>{list();status();if(cur&&/분류 중|영향 분석 중|수정안 생성 중|생성 중/.test($('d').textContent)&&document.activeElement.tagName!=='INPUT')show(cur)},4000);
+setInterval(()=>{list();status();if(cur&&/분류 중|영향 분석 중|수정안 생성 중|생성 중|테이블 분석 중/.test($('d').textContent)&&document.activeElement.tagName!=='INPUT')show(cur)},4000);
 status();list();loadProjects();
 </script></body></html>
