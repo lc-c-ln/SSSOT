@@ -18,6 +18,16 @@ python -m ssot web                                            # 웹 UI: http://1
 
 자세한 옵션, 표 인식 규칙, AI 설정은 **[USAGE.md](USAGE.md)** 를 보세요.
 
+## SR 접수 서버 (M1)
+
+```bash
+python -m ssot sr                # http://127.0.0.1:8766  (DB: ssot_sr.db, 로컬 Ollama 필요)
+```
+
+웹 폼으로 SR을 등록하면 로컬 Ollama(`/api/chat`)가 소스 수정/데이터 수정으로 분류합니다. 신뢰도가 낮거나 응답이 이상하면 담당자 확인 대기, Ollama가 꺼져 있으면 `AI 응답 대기`로 보존되어 재시도할 수 있습니다. 모든 LLM 호출(프롬프트·응답)과 상태 변경은 SQLite 감사 로그(수정·삭제 불가, 해시 체인, 비밀값 마스킹)에 남습니다. 설계는 [docs/PRD.md](docs/PRD.md) 참고.
+
+환경변수: `OLLAMA_HOST`, `SSOT_MODEL`(기본 qwen2.5-coder:7b), `SSOT_NUM_CTX`, `SSOT_LOCAL_ONLY=1`(외부 LLM 차단). 로컬/사설망이 아닌 Ollama 주소는 거부됩니다.
+
 ## 동작 원칙
 
 - 사람이 쓴 **설명은 덮어쓰지 않습니다.** 빈 칸만 채우고, 바뀐 항목이 있으면 "확인 필요"로 알립니다.

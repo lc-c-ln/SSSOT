@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SR 접수</title>
+<style>
+:root{--bg:#f4f5f7;--s:#fff;--ink:#1b2430;--mut:#5d6877;--line:#d9dde4;--acc:#1f4fd8;--ok:#0f766e;--wait:#b45309;--bad:#a4262c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 system-ui,"Malgun Gothic",sans-serif;padding:20px 16px 48px}
+.w{max-width:1100px;margin:0 auto;display:grid;gap:16px}h1{font-size:20px;margin:0}h2{font-size:15px;margin:0 0 8px}
+.g{display:grid;grid-template-columns:minmax(0,380px) minmax(0,1fr);gap:16px;align-items:start}@media(max-width:820px){.g{grid-template-columns:minmax(0,1fr)}}
+.c{background:var(--s);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}input,textarea,select{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+textarea{min-height:110px;resize:vertical}button{font:inherit;padding:7px 14px;border-radius:6px;border:1px solid var(--line);background:var(--s);color:var(--ink);cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;color:var(--mut)}
+tr.r{cursor:pointer}tr.r:hover,tr.sel{background:var(--bg)}.sc{overflow-x:auto}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:#e6ecfc;color:var(--acc)}.pill.ok{background:#dcf3ef;color:var(--ok)}.pill.wait{background:#fdf0dc;color:var(--wait)}
+.m{color:var(--mut);font-size:12px}.err{color:var(--bad);font-weight:600}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}.row>*{flex:1 1 140px}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;max-height:240px;overflow:auto;margin:4px 0 0}
+details{margin:4px 0}summary{cursor:pointer}
+</style></head><body><div class="w">
+<div><h1>SR 접수</h1><div class="m" id="st">상태 확인 중…</div></div>
+<div class="g">
+ <form class="c" id="f"><h2>새 서비스 요청</h2>
+  <label for="requester">요청자</label><input id="requester" required maxlength="100">
+  <label for="project">대상 프로젝트</label><input id="project" maxlength="200" placeholder="예: acme/member-service">
+  <label for="title">제목</label><input id="title" required maxlength="200">
+  <label for="body">요청 내용</label><textarea id="body" required maxlength="20000"></textarea>
+  <p><button class="p" type="submit">요청 등록</button> <span id="fmsg" class="m"></span></p></form>
+ <div class="c"><h2>요청 목록</h2><div class="sc"><table><thead><tr><th>번호</th><th>제목</th><th>상태</th><th>유형</th></tr></thead><tbody id="list"></tbody></table></div></div>
+</div>
+<div class="c" id="d" hidden></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ST={received:['접수','' ],classifying:['분류 중','wait'],classified:['분류 완료','ok'],needs_review:['담당자 확인 필요','wait'],pending_llm:['AI 응답 대기(재시도 필요)','wait']};
+const TY={code:'소스 수정',data:'데이터 수정',unknown:'판단 불가','':'-'};
+let cur=null;
+async function api(p,o){const r=await fetch(p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+const post=(p,b)=>api(p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
+const pill=s=>{const [t,k]=ST[s]||[s,''];return `<span class="pill ${k}">${E(t)}</span>`};
+async function status(){try{const s=await api('/api/status');const o=s.ollama;
+ $('st').innerHTML=(o.ok?`Ollama 연결됨 · 모델 ${E(o.model)} ${o.model_ready?'':'<span class="err">(미설치: ollama pull)</span>'}`:`<span class="err">Ollama 연결 안 됨</span> (${E(o.error||'')})`)+` · 감사 로그 ${s.audit.ok?'무결성 정상 ('+s.audit.count+'건)':'<span class="err">변조 의심: #'+s.audit.broken_at+'</span>'}`}catch(e){$('st').textContent=e.message}}
+async function list(){const {items}=await api('/api/sr');
+ $('list').innerHTML=items.map(r=>`<tr class="r ${cur===r.id?'sel':''}" data-id="${r.id}"><td>SR-${String(r.id).padStart(4,'0')}</td><td>${E(r.title)}<div class="m">${E(r.requester)}</div></td><td>${pill(r.status)}</td><td>${TY[r.sr_type]||'-'}</td></tr>`).join('')||'<tr><td colspan="4" class="m">아직 요청이 없습니다.</td></tr>'}
+async function show(id){cur=id;const {sr,audit}=await api('/api/sr/'+id);const d=$('d');d.hidden=false;
+ const need=sr.status==='needs_review',pend=sr.status==='pending_llm';
+ d.innerHTML=`<h2>SR-${String(sr.id).padStart(4,'0')} ${E(sr.title)} ${pill(sr.status)}</h2>
+ <div class="m">${E(sr.requester)} · ${E(sr.project||'-')} · ${E(sr.created_at)}</div><pre>${E(sr.body)}</pre>
+ <p>자동 분류: <b>${TY[sr.sr_type]||'-'}</b>${sr.confidence!=null?` (신뢰도 ${Number(sr.confidence).toFixed(2)})`:''} <span class="m">${E(sr.reason)}</span></p>
+ ${sr.status==='classifying'||sr.status==='received'?'':`<div class="row"><div><label for="actor">담당자</label><input id="actor" maxlength="100"></div>
+ <div><label for="mt">유형 지정/변경</label><select id="mt"><option value="code">소스 수정</option><option value="data">데이터 수정</option></select></div>
+ <div><label for="mn">사유(선택)</label><input id="mn" maxlength="200"></div><div><button id="mset">분류 저장</button> ${(need||pend)?'<button id="mretry">AI 재분류</button>':''}</div></div><div id="dm" class="err"></div>`}
+ <h2 style="margin-top:14px">처리 이력 <a class="m" href="/api/sr/${sr.id}/audit.csv">CSV</a></h2>
+ ${audit.map(a=>`<details><summary>${E(a.ts.replace('T',' ').slice(0,19))} · ${E(a.actor)} · <b>${E(a.event)}</b></summary><pre>${E(JSON.stringify(a.detail,null,2))}</pre></details>`).join('')}`;
+ const f=(fn)=>async()=>{try{await fn();await show(id);await list()}catch(e){$('dm').textContent=e.message}};
+ if($('mset'))$('mset').onclick=f(()=>post(`/api/sr/${id}/classify`,{actor:$('actor').value,type:$('mt').value,note:$('mn').value}));
+ if($('mretry'))$('mretry').onclick=f(()=>post(`/api/sr/${id}/retry`,{actor:$('actor').value||'unknown'}));
+ list()}
+$('list').onclick=e=>{const t=e.target.closest('tr.r');if(t)show(+t.dataset.id)};
+$('f').onsubmit=async e=>{e.preventDefault();$('fmsg').textContent='';try{
+ const r=await post('/api/sr',{requester:$('requester').value,project:$('project').value,title:$('title').value,body:$('body').value});
+ $('title').value='';$('body').value='';$('fmsg').textContent='등록되었습니다. AI가 분류하는 중…';await list();show(r.id)}catch(x){$('fmsg').innerHTML='<span class="err">'+E(x.message)+'</span>'}};
+setInterval(()=>{list();status();if(cur){const s=document.querySelector('.pill.wait');if(s&&/분류 중/.test($('d').textContent))show(cur)}},4000);
+status();list();
+</script></body></html>

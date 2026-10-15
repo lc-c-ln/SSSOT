@@ -1,0 +1,152 @@
+"""SR 저장소 + 감사 로그 (SQLite).
+
+감사 로그는 append-only: UPDATE/DELETE 를 트리거로 막고, 각 행이 이전 행의 해시를 포함하는 해시 체인이라
+사후 변조를 verify_audit() 으로 탐지할 수 있다.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sr (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL, body TEXT NOT NULL, requester TEXT NOT NULL, project TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL, sr_type TEXT NOT NULL DEFAULT '', confidence REAL, reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL, sr_id INTEGER, actor TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL,
+  prev_hash TEXT NOT NULL, hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+"""
+
+STATUSES = {"received", "classifying", "classified", "needs_review", "pending_llm"}
+TYPES = {"code", "data", "unknown"}
+
+_SECRET_PATTERNS = [
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    re.compile(r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|token)\b(\s*[=:]\s*)(\S+)"),
+    re.compile(r"(?i)\b(bearer)(\s+)([A-Za-z0-9._\-]{12,})"),
+    re.compile(r"\bglpat-[A-Za-z0-9_\-]{10,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+]
+
+
+def mask_secrets(text: str) -> str:
+    """프롬프트/응답을 감사 로그에 남기기 전 비밀값 패턴을 가린다."""
+    out = text
+    for pat in _SECRET_PATTERNS:
+        if pat.groups >= 3:
+            out = pat.sub(lambda m: f"{m.group(1)}{m.group(2)}***", out)
+        else:
+            out = pat.sub("***", out)
+    return out
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class Store:
+    def __init__(self, path: str | Path, mask: bool = True):
+        self.path = str(path)
+        self.mask = mask
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(self.path, check_same_thread=False)
+        self._db.row_factory = sqlite3.Row
+        with self._lock:
+            self._db.executescript(SCHEMA)
+            self._db.commit()
+
+    # ---- 감사 로그 ----
+    @staticmethod
+    def _hash(prev: str, ts: str, sr_id, actor: str, event: str, detail: str) -> str:
+        raw = "\x1f".join([prev, ts, "" if sr_id is None else str(sr_id), actor, event, detail])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def audit(self, sr_id: int | None, actor: str, event: str, detail: dict | None = None) -> int:
+        d = json.dumps(detail or {}, ensure_ascii=False, sort_keys=True)
+        if self.mask:
+            d = mask_secrets(d)
+        with self._lock:
+            row = self._db.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+            prev = row["hash"] if row else "0" * 64
+            ts = _now()
+            h = self._hash(prev, ts, sr_id, actor, event, d)
+            cur = self._db.execute(
+                "INSERT INTO audit_log(ts, sr_id, actor, event, detail, prev_hash, hash) VALUES (?,?,?,?,?,?,?)",
+                (ts, sr_id, actor, event, d, prev, h))
+            self._db.commit()
+            return cur.lastrowid
+
+    def audit_rows(self, sr_id: int | None = None) -> list[dict]:
+        with self._lock:
+            if sr_id is None:
+                rows = self._db.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+            else:
+                rows = self._db.execute("SELECT * FROM audit_log WHERE sr_id=? ORDER BY id", (sr_id,)).fetchall()
+        return [{**dict(r), "detail": json.loads(r["detail"])} for r in rows]
+
+    def verify_audit(self) -> dict:
+        """체인 전체를 다시 계산한다. 깨진 첫 행 id 를 알려 준다."""
+        prev = "0" * 64
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+        for r in rows:
+            if r["prev_hash"] != prev or r["hash"] != self._hash(prev, r["ts"], r["sr_id"], r["actor"], r["event"], r["detail"]):
+                return {"ok": False, "broken_at": r["id"], "count": len(rows)}
+            prev = r["hash"]
+        return {"ok": True, "count": len(rows)}
+
+    # ---- SR ----
+    def create_sr(self, title: str, body: str, requester: str, project: str = "") -> int:
+        title, body, requester, project = title.strip(), body.strip(), requester.strip(), project.strip()
+        if not title or not body or not requester:
+            raise ValueError("제목, 요청 내용, 요청자는 필수입니다.")
+        if len(title) > 200 or len(project) > 200 or len(requester) > 100:
+            raise ValueError("제목/프로젝트/요청자 길이가 너무 깁니다.")
+        if len(body) > 20000:
+            raise ValueError("요청 내용은 20,000자 이하로 입력하세요.")
+        now = _now()
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO sr(title, body, requester, project, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (title, body, requester, project, "received", now, now))
+            self._db.commit()
+            sr_id = cur.lastrowid
+        self.audit(sr_id, requester, "sr.created", {"title": title, "project": project})
+        return sr_id
+
+    def get_sr(self, sr_id: int) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM sr WHERE id=?", (sr_id,)).fetchone()
+        return dict(r) if r else None
+
+    def list_sr(self, limit: int = 200) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM sr ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_sr(self, sr_id: int, **fields) -> None:
+        allowed = {"status", "sr_type", "confidence", "reason"}
+        if set(fields) - allowed:
+            raise ValueError(f"수정할 수 없는 필드: {set(fields) - allowed}")
+        if "status" in fields and fields["status"] not in STATUSES:
+            raise ValueError(f"알 수 없는 상태: {fields['status']}")
+        if "sr_type" in fields and fields["sr_type"] not in TYPES | {""}:
+            raise ValueError(f"알 수 없는 유형: {fields['sr_type']}")
+        sets = ", ".join(f"{k}=?" for k in fields) + ", updated_at=?"
+        with self._lock:
+            self._db.execute(f"UPDATE sr SET {sets} WHERE id=?", (*fields.values(), _now(), sr_id))
+            self._db.commit()

@@ -11,7 +11,7 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 
 
 class LLM:
-    def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 2000, json_mode: bool = False) -> str:
         raise NotImplementedError
 
 
@@ -24,7 +24,7 @@ class AnthropicLLM(LLM):
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY 환경변수가 필요합니다.")
 
-    def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 2000, json_mode: bool = False) -> str:
         body = json.dumps({
             "model": self.model, "max_tokens": max_tokens, "system": system,
             "messages": [{"role": "user", "content": user}],
@@ -48,7 +48,7 @@ class OpenAICompatLLM(LLM):
         self.api_key = api_key or os.environ.get("SSOT_API_KEY", "ollama")
         self.timeout = timeout  # 로컬 모델은 첫 호출(모델 로딩)이 느리므로 넉넉히
 
-    def complete(self, system: str, user: str, max_tokens: int = 2000) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 2000, json_mode: bool = False) -> str:
         body = json.dumps({
             "model": self.model, "max_tokens": max_tokens, "temperature": 0.1,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -68,6 +68,8 @@ class OpenAICompatLLM(LLM):
 
 def make_llm(provider: str = "ollama", model: str | None = None, base_url: str | None = None) -> LLM:
     if provider == "anthropic":
+        if os.environ.get("SSOT_LOCAL_ONLY") == "1":
+            raise RuntimeError("SSOT_LOCAL_ONLY=1 이므로 외부 LLM(anthropic)은 사용할 수 없습니다.")
         return AnthropicLLM(model=model)
     return OpenAICompatLLM(base_url=base_url, model=model)
 

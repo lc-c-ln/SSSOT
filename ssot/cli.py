@@ -99,6 +99,12 @@ def cmd_web(a) -> int:
     return 0
 
 
+def cmd_sr(a) -> int:
+    from .sr_web import serve
+    serve(a.db, a.host, a.port, a.ollama_host, a.model, mask=not a.no_mask)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -128,6 +134,14 @@ def main(argv: list[str] | None = None) -> int:
     wb.add_argument("--host", default="127.0.0.1")
     wb.add_argument("--port", type=int, default=8765)
     wb.set_defaults(fn=cmd_web)
+    sr = sub.add_parser("sr", help="SR 접수 서버 실행 (로컬 Ollama 분류 + 감사 로그)")
+    sr.add_argument("--db", default="ssot_sr.db", help="SQLite 파일 (기본 ssot_sr.db)")
+    sr.add_argument("--host", default="127.0.0.1")
+    sr.add_argument("--port", type=int, default=8766)
+    sr.add_argument("--ollama-host", help="기본 OLLAMA_HOST 또는 http://localhost:11434")
+    sr.add_argument("--model", help="분류에 쓸 모델 (기본 SSOT_MODEL 또는 qwen2.5-coder:7b)")
+    sr.add_argument("--no-mask", action="store_true", help="감사 로그의 비밀값 마스킹 끄기")
+    sr.set_defaults(fn=cmd_sr)
     a = ap.parse_args(argv)
     return a.fn(a)
 
