@@ -26,7 +26,7 @@ from .docsync import apply_doc_patch, dismiss_doc_patch, handle_push, scan_commi
 from . import gitops
 from .oracle_meta import configured as oracle_configured
 from .gitlab import PublishError, publish
-from .impact import analyze_sr, confirm_selection
+from .impact import analyze_sr, confirm_selection, refresh_index
 from .patch import decide, generate_patch
 from .llm import LLM
 from .store import Store
@@ -39,6 +39,8 @@ class App:
     def __init__(self, store: Store, llm: LLM, sync_mode: bool = False, allow_self_approve: bool = False):
         self.store, self.llm, self.sync_mode = store, llm, sync_mode
         self.allow_self_approve = allow_self_approve
+        self.index_jobs: dict[str, dict] = {}
+        self._jobs_lock = threading.Lock()
         self._classify_lock = threading.Lock()   # 로컬 GPU 하나이므로 분류 호출은 한 번에 하나씩
 
     def run_classify(self, sr_id: int) -> None:
@@ -101,6 +103,10 @@ class App:
                                          str(p.get("token_env", "")), docs, str(p.get("db_env_prefix", "")))
         self.store.audit(None, str(p.get("actor", "")).strip() or "unknown", "project.saved",
                          {k: v for k, v in proj.items() if k != "created_at"})
+        try:     # 저장 즉시 빠른 소스 분석(AI 요약·임베딩 제외)을 시작해 SR 이 들어왔을 때 바로 검색할 수 있게 한다
+            self.index_start({"name": proj["name"], "actor": str(p.get("actor", "")), "summarize": False, "embed": False})
+        except ValueError:
+            pass
         return {"project": proj, "check": self.check_project(proj["name"])}
 
     def delete_project(self, p: dict) -> dict:
@@ -160,6 +166,47 @@ class App:
         self.start_patch(sr_id)
         return self.detail(sr_id)
 
+    # ---- 소스 미리 분석(색인) ----
+    def _index_job(self, name: str, summarize: bool, embed: bool) -> None:
+        job = self.index_jobs[name]
+
+        def progress(d: dict) -> None:
+            job["progress"] = d
+        try:
+            proj = self.store.get_project(name)
+            res = refresh_index(self.store, Path(proj["local_path"]), name, self.llm, summarize, embed, progress)
+            job.update(state="done", result=res)
+            self.store.audit(None, job["actor"], "index.completed", {"project": name, **res})
+        except Exception as e:  # noqa: BLE001
+            job.update(state="error", error=f"{type(e).__name__}: {e}"[:300])
+            self.store.set_index_meta(name, last_error=job["error"])
+            self.store.audit(None, "system", "index.failed", {"project": name, "error": job["error"]})
+
+    def index_start(self, p: dict) -> dict:
+        name = str(p.get("name", ""))
+        proj = self.store.get_project(name)
+        if not proj:
+            raise ValueError("등록되지 않은 프로젝트입니다.")
+        if not Path(proj["local_path"]).is_dir():
+            raise ValueError(f"로컬 소스 경로를 찾을 수 없습니다: {proj['local_path']}")
+        with self._jobs_lock:
+            if self.index_jobs.get(name, {}).get("state") == "running":
+                raise ValueError("이미 소스 분석이 진행 중입니다.")
+            self.index_jobs[name] = {"state": "running", "progress": {"phase": "starting"}, "actor": str(p.get("actor", "")).strip() or "unknown"}
+        summarize, embed = bool(p.get("summarize")), bool(p.get("embed", True))
+        self.store.audit(None, self.index_jobs[name]["actor"], "index.requested", {"project": name, "summarize": summarize, "embed": embed})
+        if self.sync_mode:
+            self._index_job(name, summarize, embed)
+        else:
+            threading.Thread(target=self._index_job, args=(name, summarize, embed), daemon=True).start()
+        return self.index_status(name)
+
+    def index_status(self, name: str) -> dict:
+        if not self.store.get_project(name):
+            raise LookupError("프로젝트를 찾을 수 없습니다.")
+        job = {k: v for k, v in self.index_jobs.get(name, {}).items() if k != "actor"}
+        return {"job": job, "index": self.store.index_meta(name)}
+
     # ---- 데이터 수정 (M5) ----
     def run_data(self, sr_id: int) -> None:
         with self._classify_lock:
@@ -192,6 +239,10 @@ class App:
             try:
                 res = handle_push(self.store, self.llm, payload)
                 self.store.audit(None, "gitlab", "hook.processed", {"result": res})
+                name = res.get("project")
+                proj = self.store.get_project(name) if name else None
+                if proj and Path(proj["local_path"]).is_dir():     # 새 커밋 반영: 바뀐 파일만 다시 색인
+                    refresh_index(self.store, Path(proj["local_path"]), name)
             except Exception as e:  # noqa: BLE001
                 self.store.audit(None, "system", "hook.failed", {"error": f"{type(e).__name__}: {e}"})
 
@@ -417,6 +468,9 @@ def make_handler(app: App, users: dict[str, str] | None = None):
                 return self._guard(app.projects)
             if path == "/api/docs":
                 return self._guard(app.docs_list)
+            if path == "/api/projects/index":
+                name = parse_qs(urlparse(self.path).query).get("name", [""])[0]
+                return self._guard(lambda: app.index_status(name))
             m = re.fullmatch(r"/api/projects/check", path)
             if m:
                 name = parse_qs(urlparse(self.path).query).get("name", [""])[0]
@@ -470,6 +524,8 @@ def make_handler(app: App, users: dict[str, str] | None = None):
                 return self._guard(lambda: fn(int(m.group(1)), body()))
             if path == "/api/projects":
                 return self._guard(lambda: app.save_project(body()))
+            if path == "/api/projects/index":
+                return self._guard(lambda: app.index_start(body()))
             if path == "/api/projects/delete":
                 return self._guard(lambda: app.delete_project(body()))
             m = re.fullmatch(r"/api/sr/(\d+)/(classify|retry|analyze|impact|project|data/analyze|data/report|patch/generate|patch/decide|patch/publish)", path)

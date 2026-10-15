@@ -53,6 +53,24 @@ CREATE TABLE IF NOT EXISTS sr_data (
   sr_id INTEGER PRIMARY KEY, schema_source TEXT NOT NULL, tables TEXT NOT NULL, related TEXT NOT NULL,
   statements TEXT NOT NULL, notes TEXT NOT NULL, diffs TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS code_file (
+  project TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, sha TEXT NOT NULL,
+  PRIMARY KEY (project, path)
+);
+CREATE TABLE IF NOT EXISTS code_chunk (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, path TEXT NOT NULL, cls TEXT NOT NULL,
+  method TEXT NOT NULL, line INTEGER NOT NULL, text TEXT NOT NULL, snippet TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS code_chunk_pf ON code_chunk(project, path);
+CREATE TABLE IF NOT EXISTS code_summary (
+  project TEXT NOT NULL, path TEXT NOT NULL, cls TEXT NOT NULL, sha TEXT NOT NULL, summary TEXT NOT NULL,
+  PRIMARY KEY (project, path, cls)
+);
+CREATE TABLE IF NOT EXISTS code_index (
+  project TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, built_at TEXT NOT NULL DEFAULT '',
+  files INTEGER NOT NULL DEFAULT 0, chunks INTEGER NOT NULL DEFAULT 0, summaries INTEGER NOT NULL DEFAULT 0,
+  embedded INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS embed_cache (sha TEXT NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (sha, model));
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
@@ -387,3 +405,66 @@ class Store:
         for k in ("tables", "related", "statements", "notes", "diffs"):
             d[k] = json.loads(d[k])
         return d
+
+    # ---- 소스 색인(미리 분석) ----
+    def code_files(self, project: str) -> dict[str, tuple[int, int, str]]:
+        with self._lock:
+            rows = self._db.execute("SELECT path, size, mtime_ns, sha FROM code_file WHERE project=?", (project,)).fetchall()
+        return {r["path"]: (r["size"], r["mtime_ns"], r["sha"]) for r in rows}
+
+    def code_replace_file(self, project: str, path: str, size: int, mtime_ns: int, sha: str, chunks: list[tuple]) -> None:
+        """chunks: (cls, method, line, text, snippet)"""
+        with self._lock:
+            self._db.execute("DELETE FROM code_chunk WHERE project=? AND path=?", (project, path))
+            self._db.executemany(
+                "INSERT INTO code_chunk(project, path, cls, method, line, text, snippet) VALUES (?,?,?,?,?,?,?)",
+                [(project, path, *c) for c in chunks])
+            self._db.execute("INSERT OR REPLACE INTO code_file(project, path, size, mtime_ns, sha) VALUES (?,?,?,?,?)",
+                             (project, path, size, mtime_ns, sha))
+            self._db.commit()
+
+    def code_touch_file(self, project: str, path: str, size: int, mtime_ns: int) -> None:
+        with self._lock:
+            self._db.execute("UPDATE code_file SET size=?, mtime_ns=? WHERE project=? AND path=?", (size, mtime_ns, project, path))
+            self._db.commit()
+
+    def code_delete_files(self, project: str, paths: list[str]) -> None:
+        with self._lock:
+            for p in paths:
+                for t in ("code_file", "code_chunk", "code_summary"):
+                    self._db.execute(f"DELETE FROM {t} WHERE project=? AND path=?", (project, p))
+            self._db.commit()
+
+    def code_chunks(self, project: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute("SELECT path, cls, method, line, text, snippet FROM code_chunk WHERE project=? ORDER BY id",
+                                    (project,)).fetchall()
+
+    def summaries(self, project: str) -> dict[tuple[str, str], tuple[str, str]]:
+        with self._lock:
+            rows = self._db.execute("SELECT path, cls, sha, summary FROM code_summary WHERE project=?", (project,)).fetchall()
+        return {(r["path"], r["cls"]): (r["sha"], r["summary"]) for r in rows}
+
+    def put_summary(self, project: str, path: str, cls: str, sha: str, summary: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO code_summary(project, path, cls, sha, summary) VALUES (?,?,?,?,?)",
+                             (project, path, cls, sha, summary))
+            self._db.commit()
+
+    def index_meta(self, project: str) -> dict:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM code_index WHERE project=?", (project,)).fetchone()
+        return dict(r) if r else {"project": project, "version": 0, "built_at": "", "files": 0, "chunks": 0,
+                                  "summaries": 0, "embedded": 0, "last_error": ""}
+
+    def set_index_meta(self, project: str, bump: bool = False, **fields) -> None:
+        cur = self.index_meta(project)
+        cur.update(fields)
+        if bump:
+            cur["version"] += 1
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO code_index(project, version, built_at, files, chunks, summaries, embedded, last_error)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (project, cur["version"], cur["built_at"], cur["files"], cur["chunks"], cur["summaries"], cur["embedded"], cur["last_error"]))
+            self._db.commit()

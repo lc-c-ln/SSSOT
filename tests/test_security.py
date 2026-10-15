@@ -108,11 +108,14 @@ def test_external_llm_blocked_in_local_only(monkeypatch):
 
 
 def test_index_cache_reused_until_files_change(tmp_path):
-    src = tmp_path / "A.java"
-    src.write_text("package a; public class A { public void run() {} }", encoding="utf-8")
-    c1, bm1 = get_index(tmp_path)
-    c2, bm2 = get_index(tmp_path)
+    store = Store(tmp_path / "i.db")
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "A.java"
+    f.write_text("package a; public class A { public void run() {} }", encoding="utf-8")
+    c1, bm1 = get_index(store, src, "p")
+    c2, bm2 = get_index(store, src, "p")
     assert bm1 is bm2                                                                    # 변경 없으면 재사용
-    src.write_text("package a; public class A { public void run() {} public void stop() {} }", encoding="utf-8")
-    c3, bm3 = get_index(tmp_path)
+    f.write_text("package a; public class A { public void run() {} public void stop() {} }", encoding="utf-8")
+    c3, bm3 = get_index(store, src, "p")
     assert bm3 is not bm1 and any(c.method == "stop" for c in c3)
